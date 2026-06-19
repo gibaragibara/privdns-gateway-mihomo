@@ -45,6 +45,11 @@ def send(chat, text, kb=None):
     post("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML",
                          "reply_markup": kb or MENU, "disable_web_page_preview": True})
 
+def send_plain(chat, text):
+    """纯文本回复, 不挂任何键盘 (操作结果/确认用, 避免每次刷出整排菜单)。"""
+    post("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML",
+                         "disable_web_page_preview": True})
+
 def edit(chat, mid, text, kb=None):
     r = post("editMessageText", {"chat_id": chat, "message_id": mid, "text": text, "parse_mode": "HTML",
                                  "reply_markup": kb or MENU, "disable_web_page_preview": True})
@@ -437,7 +442,7 @@ def handle_cb(chat, mid, data):
 def handle_text(chat, text):
     text = text.strip()
     if text == "/cancel":
-        state.pop(chat, None); send(chat, "已取消"); return
+        state.pop(chat, None); send_plain(chat, "已取消"); return
     if text in ("/start", "/menu", "/status"):
         state.pop(chat, None); send(chat, status_text()); return
     if text.startswith("/"):
@@ -462,11 +467,11 @@ def handle_text(chat, text):
             m = _rs_meta()
             send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
         if cmd == "/restart":
-            ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send(chat, "✅ 已重启" if ok else "重启失败"); return
+            ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send_plain(chat, "✅ 已重启" if ok else "重启失败"); return
         if cmd == "/update":
-            send(chat, "更新中…"); r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
-            send(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
-        send(chat, "未知命令", MENU); return
+            send_plain(chat, "更新中…"); r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
+            send_plain(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
+        send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.pop(chat, None)
     if act == "add_exit":
         try:
@@ -475,23 +480,23 @@ def handle_text(chat, text):
                 c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != ob["tag"]]
                 c["outbounds"].append(ob)
             ok, msg = apply_sb(mod)
-            send(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
+            send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
         except Exception as e:  # noqa: BLE001
-            send(chat, f"解析失败: {e}")
+            send_plain(chat, f"解析失败: {e}")
         return
     if act == "add_rule":
         p = text.split()
-        send(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
+        send_plain(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
         return
     if act == "del_rule":
-        ok, msg = del_rule(text); send(chat, ("✅ " if ok else "") + msg); return
+        ok, msg = del_rule(text); send_plain(chat, ("✅ " if ok else "") + msg); return
     if act == "add_rs":
         p = text.split()
         if len(p) != 2:
-            send(chat, "格式: 规则集URL 出口"); return
-        send(chat, "正在下载规则集…")
-        ok, msg = add_ruleset(p[0], p[1]); send(chat, ("✅ " if ok else "") + msg); return
-    send(chat, "用按钮操作：", MENU)
+            send_plain(chat, "格式: 规则集URL 出口"); return
+        send_plain(chat, "正在下载规则集…")
+        ok, msg = add_ruleset(p[0], p[1]); send_plain(chat, ("✅ " if ok else "") + msg); return
+    send_plain(chat, "发 /start 打开菜单")
 
 def main():
     post("deleteWebhook", {"drop_pending_updates": False})
