@@ -95,7 +95,7 @@ def _nav(key):
         "ops": ("🛠 <b>运维</b> — 选一项:", [
             [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
             [{"text": "💾 备份", "callback_data": "backup"}, {"text": "♻️ 恢复", "callback_data": "restore"}],
-            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}]]),
+            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}, {"text": "🚀 TFO", "callback_data": "tfo"}]]),
     }
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
@@ -337,6 +337,35 @@ def set_mosdns_upstream(which, addrs):
         shutil.copy(MOSDNS_CONF + ".botbak", MOSDNS_CONF); sh(["systemctl", "restart", "mosdns"])
         return False, "mosdns 重启失败(配置可能不合法), 已回滚"
     return True, f"✅ {which} 上游已设为: {', '.join(addrs)}"
+
+# ── TCP Fast Open ──
+def _tfo_on(c):
+    obs = [o for o in c["outbounds"] if o.get("type") in PROXY_TYPES]
+    return bool(obs) and all(o.get("tcp_fast_open") for o in obs)
+
+def set_tfo(on):
+    def mod(c):
+        for o in c["outbounds"]:
+            if o.get("type") in PROXY_TYPES:
+                if on:
+                    o["tcp_fast_open"] = True
+                else:
+                    o.pop("tcp_fast_open", None)
+        for i in c.get("inbounds", []):
+            if on:
+                i["tcp_fast_open"] = True
+            else:
+                i.pop("tcp_fast_open", None)
+    ok, msg = apply_sb(mod)
+    if ok and on:
+        sh(["sysctl", "-w", "net.ipv4.tcp_fastopen=3"])
+        try:
+            with open("/etc/sysctl.d/99-pdg-tfo.conf", "w") as f:
+                f.write("net.ipv4.tcp_fastopen=3\n")
+        except Exception:  # noqa: BLE001
+            pass
+    return ok, ((f"✅ TFO 已{'开启' if on else '关闭'}(出口+入口)\n"
+                 "降到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。") if ok else msg)
 
 # ── 规则集 (Surge .list -> sing-box local rule_set) ──
 def _rs_meta():
@@ -861,6 +890,14 @@ def handle_cb(chat, mid, data):
              "改: 发「<b>remote 地址…</b>」或「<b>local 地址…</b>」(可多个, 空格分隔)\n"
              "接 DNS 解锁: <code>remote udp://解锁DNS的IP:53</code>\n"
              "恢复默认国际: <code>remote https://1.1.1.1/dns-query udp://8.8.8.8:53</code>\n/cancel 取消。", BACK); return
+    if data == "tfo":
+        on = _tfo_on(load())
+        edit(chat, mid, f"🚀 <b>TCP Fast Open</b>\n当前: <b>{'开启' if on else '关闭'}</b>\n"
+             "降低到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。",
+             {"inline_keyboard": [[{"text": "开启", "callback_data": "tfo:on"}, {"text": "关闭", "callback_data": "tfo:off"}],
+                                  [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}); return
+    if data in ("tfo:on", "tfo:off"):
+        ok, msg = set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
         edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, MENU); return
