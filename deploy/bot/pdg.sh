@@ -13,9 +13,9 @@ need_root(){ [[ $EUID -eq 0 ]] || { echo "请用 root: sudo pdg $*"; exit 1; }; 
 cmd_status(){
   c_g "== 服务 =="
   for s in mosdns sing-box pdg-bot pdg-probe81; do
-    printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null || echo -)"
+    printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
-  echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null || echo -)"
+  echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   echo "  监听端口     $(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|9090)\b' | sort -u | tr '\n' ' ')"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" log --oneline -1 2>/dev/null)"; fi
