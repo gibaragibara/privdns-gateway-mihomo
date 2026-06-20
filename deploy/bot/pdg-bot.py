@@ -759,6 +759,9 @@ def status_text():
         return "🟢" if sh(["systemctl", "is-active", s]).stdout.strip() == "active" else "🔴"
     c = load(); exits = exit_tags(c)
     g = _groups_desc(c)
+    final = c["route"].get("final")
+    nrules = sum(1 for r in c["route"]["rules"] if r.get("outbound"))
+    split = "国内直连" + (f" / {nrules} 条分流规则" if nrules else "") + f" / 其余→{final}"
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
             f"{dot('sing-box')} sing-box（流量出口）\n"
@@ -769,7 +772,7 @@ def status_text():
             + (g + "\n" if g else "")
             + f"🎯 默认出口(其余国际): <b>{c['route'].get('final')}</b>\n"
             f"📚 规则集: {len(_rs_meta())} 个\n"
-            "🌏 分流: 国内直连 / AI·加密→tw / 其余→默认出口")
+            f"🌏 分流: {split}")
 
 def exits_text():
     c = load(); lines = []
