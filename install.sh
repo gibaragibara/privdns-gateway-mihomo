@@ -115,6 +115,8 @@ install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/

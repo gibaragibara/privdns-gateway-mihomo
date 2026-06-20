@@ -21,6 +21,8 @@ cmd_status(){
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null)"; fi
 }
 
+cmd_doctor(){ python3 /opt/pdg-bot/doctor.py "$@"; }
+
 cmd_update(){
   need_root update
   command -v git >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git; }
@@ -36,6 +38,8 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
@@ -111,24 +115,26 @@ menu(){
   while true; do
     echo; c_g "===== PrivDNS Gateway 管理 ====="
     echo "  1) 状态"
-    echo "  2) 更新"
-    echo "  3) 设置 / 更换 bot token"
-    echo "  4) 重启服务"
-    echo "  5) 日志"
-    echo "  6) 流量(vnstat 网卡累计)"
-    echo "  7) iOS 描述文件"
-    echo "  8) 卸载"
+    echo "  2) 体检(doctor)"
+    echo "  3) 更新"
+    echo "  4) 设置 / 更换 bot token"
+    echo "  5) 重启服务"
+    echo "  6) 日志"
+    echo "  7) 流量(vnstat 网卡累计)"
+    echo "  8) iOS 描述文件"
+    echo "  9) 卸载"
     echo "  0) 退出"
     read -rp "选择: " c || exit 0
     case "$c" in
       1) cmd_status;;
-      2) cmd_update;;
-      3) cmd_token;;
-      4) cmd_restart;;
-      5) cmd_log 60;;
-      6) cmd_traffic;;
-      7) cmd_ios;;
-      8) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
+      2) cmd_doctor;;
+      3) cmd_update;;
+      4) cmd_token;;
+      5) cmd_restart;;
+      6) cmd_log 60;;
+      7) cmd_traffic;;
+      8) cmd_ios;;
+      9) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
          case "$x" in yes) cmd_uninstall;; purge) cmd_uninstall --purge;; *) echo "已取消";; esac;;
       0|q) exit 0;;
       *) echo "无效选择";;
@@ -139,6 +145,7 @@ menu(){
 case "${1:-menu}" in
   menu|"")       menu;;
   status|st)     cmd_status;;
+  doctor|dr)     shift || true; cmd_doctor "${1:-}";;
   update|up)     cmd_update;;
   token)         cmd_token;;
   restart)       cmd_restart;;
@@ -146,5 +153,5 @@ case "${1:-menu}" in
   traffic|tr)    cmd_traffic;;
   ios)           cmd_ios;;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|update|token|restart|log [n]|traffic|ios|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json]|update|token|restart|log [n]|traffic|ios|uninstall [--purge]]";;
 esac
