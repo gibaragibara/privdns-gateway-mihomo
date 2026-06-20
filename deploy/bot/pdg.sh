@@ -54,6 +54,47 @@ cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-
 
 cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 
+cmd_ios(){
+  need_root ios
+  local TMPL=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+  [[ -f "$TMPL" ]] || { echo "缺少 $TMPL, 先装好 PrivDNS Gateway"; return 1; }
+  command -v qrencode >/dev/null || { c_g "装 qrencode…"; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode; }
+  # 取 DoT 主机名(证书 CN)/ 公网 IP / 内网卡段
+  local CERT=/etc/mosdns/certs/fullchain.pem; [[ -f /etc/dnsdist/certs/fullchain.pem ]] && CERT=/etc/dnsdist/certs/fullchain.pem
+  local HOST IP CIDR
+  HOST=$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null | grep -oE 'CN *= *[A-Za-z0-9.*-]+' | sed 's/.*= *//')
+  IP=$(grep -oE '"[0-9.]+/32"' /etc/sing-box/config.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  [[ -n "$IP" ]] || IP=$(curl -fsSL --max-time 6 https://api.ipify.org)
+  CIDR=$(grep -oE 'ip saddr [0-9./]+' /etc/nftables.conf 2>/dev/null | head -1 | awk '{print $3}')
+  [[ -n "$HOST" && -n "$IP" && -n "$CIDR" ]] || { echo "信息不全 (HOST=$HOST IP=$IP CIDR=$CIDR)"; return 1; }
+
+  local PORT=8443 TOK U1 U2 WWW URL
+  TOK=$(openssl rand -hex 6)
+  U1=$(cat /proc/sys/kernel/random/uuid | tr a-z A-Z); U2=$(cat /proc/sys/kernel/random/uuid | tr a-z A-Z)
+  WWW=$(mktemp -d)
+  sed -e "s/__DOT_HOST__/$HOST/g" -e "s/__JP_IP__/$IP/g" -e "s/__UUID1__/$U1/g" -e "s/__UUID2__/$U2/g" \
+      "$TMPL" > "$WWW/$TOK.mobileconfig"
+  URL="http://$IP:$PORT/$TOK.mobileconfig"
+
+  local SRV=""
+  trap 'kill "$SRV" 2>/dev/null; nft -f /etc/nftables.conf 2>/dev/null; rm -rf "$WWW"; trap - INT TERM' INT TERM
+  nft insert rule inet filter input ip saddr "$CIDR" tcp dport "$PORT" accept 2>/dev/null
+  ( cd "$WWW" && timeout 600 python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &
+  SRV=$!
+  qrencode -o /opt/pdg-bot/ios-qr.png "$URL" 2>/dev/null || true
+  echo
+  c_g "用手机(走【内网卡/蜂窝】, 关 WiFi)扫下面二维码 → Safari 打开 → 安装描述文件:"
+  echo; qrencode -t ANSIUTF8 "$URL"; echo
+  echo "  链接: $URL"
+  echo "  DoT:  $HOST   (PNG 已存 /opt/pdg-bot/ios-qr.png)"
+  c_y "装好后按回车收尾(10 分钟自动收)…"
+  read -t 600 -r _ || true
+  kill "$SRV" 2>/dev/null
+  nft -f /etc/nftables.conf 2>/dev/null   # 撤掉临时放行
+  rm -rf "$WWW"
+  echo "已关闭临时下载服务。"
+}
+
 cmd_uninstall(){
   need_root uninstall
   if [[ -f "$REPO_DIR/uninstall.sh" ]]; then bash "$REPO_DIR/uninstall.sh" "${1:-}"
@@ -68,7 +109,8 @@ menu(){
     echo "  3) 设置 / 更换 bot token"
     echo "  4) 重启服务"
     echo "  5) 看日志"
-    echo "  6) 卸载"
+    echo "  6) iOS 描述文件(二维码, 不用 bot)"
+    echo "  7) 卸载"
     echo "  0) 退出"
     read -rp "选择: " c || exit 0
     case "$c" in
@@ -77,7 +119,8 @@ menu(){
       3) cmd_token;;
       4) cmd_restart;;
       5) cmd_log 60;;
-      6) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
+      6) cmd_ios;;
+      7) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
          case "$x" in yes) cmd_uninstall;; purge) cmd_uninstall --purge;; *) echo "已取消";; esac;;
       0|q) exit 0;;
       *) echo "无效选择";;
@@ -92,6 +135,7 @@ case "${1:-menu}" in
   token)         cmd_token;;
   restart)       cmd_restart;;
   log|logs)      shift || true; cmd_log "${1:-40}";;
+  ios)           cmd_ios;;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|update|token|restart|log [n]|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|update|token|restart|log [n]|ios|uninstall [--purge]]";;
 esac

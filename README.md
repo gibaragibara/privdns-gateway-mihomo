@@ -54,7 +54,7 @@ cd privdns-gateway && sudo ./install.sh
    - **📤 出口管理 → 添加**:粘贴 `ss:// / vmess:// / trojan:// / vless://` 落地链接。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**,装上即可(蜂窝双卡探测 `:81` 已自动配好)。
+3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。蜂窝双卡探测 `:81` 已自动配好。
 4. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
@@ -66,6 +66,7 @@ sudo pdg token      # 设置 / 更换 bot token
 sudo pdg status     # 状态
 sudo pdg restart    # 重启服务
 sudo pdg log [n]    # 看日志
+sudo pdg ios        # 不用 bot, 直接出 iOS 描述文件二维码(手机扫码安装)
 sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 ```
 
