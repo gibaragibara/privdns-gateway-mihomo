@@ -121,3 +121,29 @@ gvt2.com / gvt3.com / android.com`，`systemctl restart dnsdist` 生效。
 ### mosdns vs smartdns（结论）
 - **必须 mosdns**：本项目把 DNS 当策略引擎（代理域名 A 改写成服务器 IP、按来源 IP 分支、按域名置空 AAAA/HTTPS、
   ECS 分治），smartdns 模型是“解析最快真实 IP”，做不到兜底改写与来源分支。smartdns 只适合藏在 mosdns 后面当国内加速上游。
+
+---
+
+## 阶段四：自定义 DoT 域名 + iOS :81 探测 + 二级菜单（2026-06-20，已部署）
+
+### 自定义 DoT 域名（项目不锁域名）
+- 域名/DNS 商**完全不限制**：ClouDNS 只是托管记录。换域名只需「A 记录→本机 IP」+「DoT(853) 证书匹配该名」两件一致。
+- 现网证书签发方式 = **certbot `--standalone`**（账户已注册，新域名免邮箱）。⚠️ 发现两个潜在坑并修复：
+  1. 原 `pre_hook` 只开防火墙 80、**没腾出 80 口**，而 sing-box 占着 0.0.0.0:80 → 8 月自动续期本会失败。
+     已改 `pre_hook` 加 `systemctl stop sing-box`、`post_hook` 加 `start`（`certbot renew --dry-run` 实测通过）。
+  2. deploy-hook 原来只 reload 已停用的 dnsdist。已改为拷证书到 `/etc/dnsdist/certs/` 后**重启 mosdns**，
+     且按 `RENEWED_LINEAGE`→`/opt/pdg-bot/dot-domain`→最近 live 选证书（多域名也不串）。
+- bot 新增「🌐 DoT 自定义域名」(`set_dot_domain`/`/setdot`)：校验 A 记录是否指向本机 → `certbot certonly --standalone`
+  (带上述 hook) → 拷证书 → 重启 mosdns → 清 `_DOT_HOST` 缓存。手机改私密 DNS 主机名即可；iOS 重生成描述文件自动用新名。
+- **Cloudflare 注意**：必须「灰云 DNS only」(橙云代理不覆盖 853)；`abrdns.com` 是 ClouDNS 的免费域、搬不走，要用自己的域名。
+- 脚本：`deploy/cert/{proxy-gateway-open-cert-http.sh, proxy-gateway-restore-firewall.sh, 99-reload-cert.deploy-hook.sh}`。
+
+### iOS OnDemand :81 探测端点（双卡区分）
+- `deploy/ios/probe81.py`（:81 任意 GET→204，systemd `pdg-probe81.service`，DynamicUser+CAP_NET_BIND_SERVICE）。
+- nftables 把 81 加进内网卡放行集：`ip saddr 172.22.0.0/16 tcp dport { 80, 81, 443 }`；81 **不在**无差别集 `{22,53,853,8111}` 里，
+  policy drop 兜底 → **普通卡探不通、内网卡探得通**，iOS OnDemand 据此只在内网卡(蜂窝)激活 DoT。
+  (从本机测「公网IP:81」会因自身 IP 走 lo 被 `iif lo accept` 而返 204，非破绽；外部非 172.22 源走 policy drop。)
+
+### bot 内联菜单改二级
+- 一级只留：状态 / 测出口 / 流量 + 四分类（📤出口管理 / 📑分流管理 / 📱客户端 / 🛠运维）；点分类展开二级子菜单，
+  每个子菜单自带「返回主菜单」。`_nav(key)` 生成子菜单。减少一屏按钮。

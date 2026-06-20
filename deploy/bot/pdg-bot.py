@@ -68,20 +68,35 @@ def tg_download(file_id):
     with urllib.request.urlopen(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", timeout=120) as resp:
         return resp.read()
 
+# 一级菜单: 只放常用诊断 + 4 个分类入口 (展开二级, 避免一屏按钮看花眼)
 MENU = {"inline_keyboard": [
     [{"text": "📊 状态", "callback_data": "status"}, {"text": "🚦 测出口", "callback_data": "test"},
      {"text": "📈 流量", "callback_data": "traffic"}],
-    [{"text": "📋 出口列表", "callback_data": "exits"}, {"text": "➕ 添加出口", "callback_data": "add_exit"},
-     {"text": "🗑 删出口/组", "callback_data": "del_exit"}],
-    [{"text": "🎯 设默认出口", "callback_data": "setfinal"}, {"text": "🔀 故障切换组", "callback_data": "add_grp"}],
-    [{"text": "📑 分流规则", "callback_data": "rules"}, {"text": "➕ 添加规则", "callback_data": "add_rule"},
-     {"text": "🗑 删规则", "callback_data": "del_rule"}],
-    [{"text": "📚 添加规则集", "callback_data": "add_rs"}, {"text": "🗑 删规则集", "callback_data": "del_rs"}],
-    [{"text": "📱 iOS 描述文件", "callback_data": "ios"}, {"text": "💾 备份", "callback_data": "backup"},
-     {"text": "♻️ 恢复", "callback_data": "restore"}],
-    [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
+    [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
+    [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
+
+def _nav(key):
+    """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
+    subs = {
+        "exit": ("📤 <b>出口管理</b> — 选一项:", [
+            [{"text": "📋 列表", "callback_data": "exits"}, {"text": "➕ 添加", "callback_data": "add_exit"},
+             {"text": "🗑 删除", "callback_data": "del_exit"}],
+            [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "🔀 故障切换组", "callback_data": "add_grp"}]]),
+        "rule": ("📑 <b>分流管理</b> — 选一项:", [
+            [{"text": "📋 规则", "callback_data": "rules"}, {"text": "➕ 加规则", "callback_data": "add_rule"},
+             {"text": "🗑 删规则", "callback_data": "del_rule"}],
+            [{"text": "📚 加规则集", "callback_data": "add_rs"}, {"text": "🗑 删规则集", "callback_data": "del_rs"}]]),
+        "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
+            [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
+            [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}]]),
+        "ops": ("🛠 <b>运维</b> — 选一项:", [
+            [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
+            [{"text": "💾 备份", "callback_data": "backup"}, {"text": "♻️ 恢复", "callback_data": "restore"}]]),
+    }
+    title, rows = subs[key]
+    return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 
 def send(chat, text, kb=None):
     post("sendMessage", {"chat_id": chat, "text": text, "parse_mode": "HTML",
@@ -502,6 +517,48 @@ def del_rule(domain):
         _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
     return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
 
+# ── 自定义 DoT 域名 (certbot standalone 签证书 → 换 mosdns DoT 证书) ──
+def set_dot_domain(domain):
+    domain = domain.strip().lower().rstrip(".")
+    if not re.match(r"^(?=.{1,253}$)([a-z0-9-]+\.)+[a-z]{2,}$", domain):
+        return False, "域名格式不对"
+    sip = _server_ip()
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(domain, None, socket.AF_INET)}
+    except Exception:  # noqa: BLE001
+        addrs = set()
+    if sip not in addrs:
+        return False, (f"{domain} 现在解析到 {addrs or '(解析不到)'}, 不是本机 {sip}。\n"
+                       f"先在 DNS 商把它 A 记录指向 {sip}(Cloudflare 选「灰云 DNS only」), 生效后再试。")
+    try:
+        r = subprocess.run(
+            ["certbot", "certonly", "--standalone", "-d", domain,
+             "--non-interactive", "--agree-tos", "--keep-until-expiring",
+             "--pre-hook", "/usr/local/bin/proxy-gateway-open-cert-http.sh",
+             "--post-hook", "/usr/local/bin/proxy-gateway-restore-firewall.sh"],
+            capture_output=True, text=True, timeout=300)
+    except Exception as e:  # noqa: BLE001
+        return False, f"certbot 执行异常: {e}"
+    if r.returncode != 0:
+        return False, "证书签发失败:\n" + (r.stdout + r.stderr)[-500:]
+    live = f"/etc/letsencrypt/live/{domain}"
+    try:
+        shutil.copy(f"{live}/fullchain.pem", "/etc/dnsdist/certs/fullchain.pem")
+        shutil.copy(f"{live}/privkey.pem", "/etc/dnsdist/certs/privkey.pem")
+        sh(["chown", "-R", "_dnsdist:_dnsdist", "/etc/dnsdist/certs"])
+        sh(["chmod", "640", "/etc/dnsdist/certs/fullchain.pem", "/etc/dnsdist/certs/privkey.pem"])
+        with open("/opt/pdg-bot/dot-domain", "w") as f:
+            f.write(domain + "\n")
+    except Exception as e:  # noqa: BLE001
+        return False, f"证书已签发但部署失败: {e}"
+    sh(["systemctl", "restart", "mosdns"])
+    global _DOT_HOST
+    _DOT_HOST = None  # 让 _dot_host() 重新读新证书 CN
+    return True, (f"✅ DoT 域名已设为 <b>{domain}</b>\n"
+                  f"• 手机私密 DNS 改成: <code>{domain}</code>\n"
+                  "• 证书已签发, certbot.timer 自动续期\n"
+                  "• iOS: 重点一下「📱 iOS 描述文件」即可(自动用新域名)")
+
 # ── iOS 描述文件 ──
 def _ios_profile():
     if not os.path.exists(IOS_TMPL):
@@ -655,6 +712,13 @@ def kb_pick(prefix, tags):
 def handle_cb(chat, mid, data):
     if data in ("menu", "status"):
         edit(chat, mid, status_text(), MENU); return
+    if data.startswith("nav:"):
+        title, kb = _nav(data[4:]); edit(chat, mid, title, kb); return
+    if data == "setdot":
+        state[chat] = "set_dot"
+        edit(chat, mid, "发你的自定义 DoT 域名(先把它的 A 记录指向本机, Cloudflare 用「灰云 DNS only」)。\n"
+             f"本机 IP: <code>{_server_ip()}</code>\n例: <code>dot.example.com</code>\n"
+             "我会自动签 Let's Encrypt 证书并切换(过程会短暂中断代理约 30 秒)。/cancel 取消。", BACK); return
     if data == "test":
         edit(chat, mid, "测试中…", None); edit(chat, mid, test_exits(), BACK); return
     if data == "traffic":
@@ -794,6 +858,8 @@ def handle_text(chat, text):
             send_document(chat, "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz", backup_blob(), "💾 配置备份"); return
         if cmd == "/restore":
             state[chat] = "restore"; send(chat, "把备份 .tar.gz 作为文件发来。/cancel 取消。", BACK); return
+        if cmd == "/setdot":
+            state[chat] = "set_dot"; send(chat, f"发自定义 DoT 域名(A 记录先指向本机 {_server_ip()})。/cancel 取消。", BACK); return
         if cmd == "/restart":
             ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send_plain(chat, "✅ 已重启" if ok else "重启失败"); return
         if cmd == "/update":
@@ -829,6 +895,9 @@ def handle_text(chat, text):
             send_plain(chat, "格式: 规则集URL 出口"); return
         send_plain(chat, "正在下载规则集…")
         ok, msg = add_ruleset(p[0], p[1]); send_plain(chat, ("✅ " if ok else "") + msg); return
+    if act == "set_dot":
+        send_plain(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…")
+        ok, msg = set_dot_domain(text); send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "restore":
         send_plain(chat, "请把备份 <code>.tar.gz</code> 作为「文件」发来, 而不是文字。/cancel 取消。"); state[chat] = "restore"; return
     send_plain(chat, "发 /start 打开菜单")

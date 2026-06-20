@@ -83,9 +83,13 @@ sudo pdg doctor
 - ✅ **TG 管理 bot v3**：[deploy/bot/](deploy/bot)，管出口（ss/vmess/trojan/vless）、**故障切换组(urltest)**、
   分流规则、Surge 规则集、**端到端测出口/流量统计(clash_api)**、**iOS 描述文件下发**、**配置备份/恢复**、重启/更新。
 - ✅ **mosdns 缓存** + 停用 5GPN 残留进程；**定时刷新规则库**（[pdg-rules-update.timer](deploy/bot/pdg-rules-update.timer)，每日）。
+- ✅ **自定义 DoT 域名**：bot「🌐 DoT 自定义域名」`/setdot`，校验 A 记录→certbot 自动签证书→切换；不锁 ClouDNS，可换 Cloudflare 等任意 DNS。
+  顺带修好了原 certbot 续期会被 sing-box 占 80 口拖垮的隐患（[deploy/cert/](deploy/cert)）。
+- ✅ **iOS OnDemand :81 探测端点**：[probe81.py](deploy/ios/probe81.py) + nft 仅放行 172.22→81，实现双卡区分激活。
+- ✅ **bot 二级菜单**：一级=状态/测出口/流量 + 出口/分流/客户端/运维四分类，点开二级，不再一屏按钮看花眼。
 - ✅ 小内存友好：三件套常驻 ≈ 90MB，512MB 小鸡可跑。
 - ✅ 实测全通：YouTube / ChatGPT / Google / Play / 国内直连。详见 [docs/production-notes.md](docs/production-notes.md)。
-- ⬜ 已知限制：Telegram App（硬编码 IP，走日本，改不了）；iOS OnDemand 蜂窝探测需服务器侧 :81 probe 端点。
+- ⬜ 已知限制：Telegram App（硬编码 IP，走日本，改不了）。
 
 > 仓库里的 `src/pdg`（规则编译器内核）+ `deploy/singbox` 是早期 Path A 的实现与模板；线上现以 mosdns(Path B)
 > + sing-box + bot 为准，见 [docs/production-notes.md](docs/production-notes.md)。
