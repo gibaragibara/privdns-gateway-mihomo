@@ -552,24 +552,38 @@ def _fmt_bytes(n):
         n /= 1024
     return f"{n:.1f}PB"
 
-def traffic_text():
-    if not clash_up():
-        return "clash_api 未响应 (刚重启请稍候重试)。"
+def _vnstat():
+    """网卡真实累计(vnstat, 重启/重启动不丢): 今日/本月/累计 ↓rx ↑tx。"""
     try:
-        d = clash_get("/connections")
-    except Exception as e:  # noqa: BLE001
-        return f"读取连接失败: {e}"
-    conns = d.get("connections") or []
-    cnt, up, dn = Counter(), Counter(), Counter()
-    for cn in conns:
-        chain = cn.get("chains") or []
-        tag = chain[0] if chain else "?"
-        cnt[tag] += 1; up[tag] += cn.get("upload", 0); dn[tag] += cn.get("download", 0)
-    lines = [f"• <b>{t}</b>: {cnt[t]}条  ↑{_fmt_bytes(up[t])} ↓{_fmt_bytes(dn[t])}"
-             for t, _ in cnt.most_common()]
-    return ("📈 <b>流量统计</b>\n"
-            f"累计 ↑{_fmt_bytes(d.get('uploadTotal'))}  ↓{_fmt_bytes(d.get('downloadTotal'))}\n"
-            f"活跃连接: {len(conns)}\n" + ("按出口:\n" + "\n".join(lines) if lines else "(当前无活跃连接)"))
+        f = sh(["vnstat", "--oneline"]).stdout.strip().split(";")
+        if len(f) >= 15:
+            return (f"今日 ↓{f[3]} ↑{f[4]}\n本月 ↓{f[8]} ↑{f[9]}\n累计 ↓{f[12]} ↑{f[13]}")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+def traffic_text():
+    parts = []
+    # 实时: clash_api —— 当前连接 + 「本会话」(sing-box 启动以来)经代理流量, sing-box 重启即清零
+    if clash_up():
+        try:
+            d = clash_get("/connections")
+            conns = d.get("connections") or []
+            cnt, up, dn = Counter(), Counter(), Counter()
+            for cn in conns:
+                tag = (cn.get("chains") or ["?"])[0]
+                cnt[tag] += 1; up[tag] += cn.get("upload", 0); dn[tag] += cn.get("download", 0)
+            lines = [f"• <b>{t}</b>: {cnt[t]}条 ↑{_fmt_bytes(up[t])} ↓{_fmt_bytes(dn[t])}"
+                     for t, _ in cnt.most_common()]
+            parts.append("📈 <b>实时(sing-box 本会话, 重启清零)</b>\n"
+                         f"会话累计 ↑{_fmt_bytes(d.get('uploadTotal'))} ↓{_fmt_bytes(d.get('downloadTotal'))}\n"
+                         f"活跃连接 {len(conns)}" + ("\n" + "\n".join(lines) if lines else ""))
+        except Exception as e:  # noqa: BLE001
+            parts.append(f"实时读取失败: {e}")
+    v = _vnstat()
+    parts.append("📊 <b>总用量(vnstat·网卡真实)</b>\n" + v if v
+                 else "📊 总用量: vnstat 未装或暂无数据(刚装需跑一会儿才有)")
+    return "\n\n".join(parts)
 
 # ── 单条规则增删 ──
 def add_rule(domain, target):

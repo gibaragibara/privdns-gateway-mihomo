@@ -46,7 +46,8 @@ REPO_DIR="$SRC"
 c_g "安装依赖…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl tar unzip nftables python3 openssl certbot dnsutils tcpdump jq ca-certificates >/dev/null
+apt-get install -y -qq curl tar unzip nftables python3 openssl certbot dnsutils tcpdump jq ca-certificates vnstat >/dev/null
+systemctl enable --now vnstat >/dev/null 2>&1 || true   # 网卡流量统计(轻量, ~3MB)
 
 # ── 2. mosdns ──
 if ! command -v mosdns >/dev/null; then

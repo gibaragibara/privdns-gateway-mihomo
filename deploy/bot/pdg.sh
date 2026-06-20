@@ -58,6 +58,8 @@ cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-
 
 cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 
+cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
+
 cmd_ios(){
   need_root ios
   local TMPL=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl
@@ -113,8 +115,9 @@ menu(){
     echo "  3) 设置 / 更换 bot token"
     echo "  4) 重启服务"
     echo "  5) 日志"
-    echo "  6) iOS 描述文件"
-    echo "  7) 卸载"
+    echo "  6) 流量(vnstat 网卡累计)"
+    echo "  7) iOS 描述文件"
+    echo "  8) 卸载"
     echo "  0) 退出"
     read -rp "选择: " c || exit 0
     case "$c" in
@@ -123,8 +126,9 @@ menu(){
       3) cmd_token;;
       4) cmd_restart;;
       5) cmd_log 60;;
-      6) cmd_ios;;
-      7) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
+      6) cmd_traffic;;
+      7) cmd_ios;;
+      8) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
          case "$x" in yes) cmd_uninstall;; purge) cmd_uninstall --purge;; *) echo "已取消";; esac;;
       0|q) exit 0;;
       *) echo "无效选择";;
@@ -139,7 +143,8 @@ case "${1:-menu}" in
   token)         cmd_token;;
   restart)       cmd_restart;;
   log|logs)      shift || true; cmd_log "${1:-40}";;
+  traffic|tr)    cmd_traffic;;
   ios)           cmd_ios;;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|update|token|restart|log [n]|ios|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|update|token|restart|log [n]|traffic|ios|uninstall [--purge]]";;
 esac
