@@ -36,7 +36,9 @@ if [[ ! -f "$SRC/deploy/mosdns/config.yaml" ]]; then
   DEST=/opt/privdns-gateway
   if [[ -d "$DEST/.git" ]]; then git -C "$DEST" pull -q --ff-only || true
   else rm -rf "$DEST"; git clone -q --depth 1 "$REPO_URL" "$DEST"; fi
-  if [[ -e /dev/tty ]]; then exec bash "$DEST/install.sh" "$@" < /dev/tty; else exec bash "$DEST/install.sh" "$@"; fi
+  # 有可用控制终端就把 stdin 接回它(交互), 否则直接重跑(靠 PDG_* 环境变量非交互)
+  if { true < /dev/tty; } 2>/dev/null; then exec bash "$DEST/install.sh" "$@" < /dev/tty
+  else exec bash "$DEST/install.sh" "$@"; fi
 fi
 REPO_DIR="$SRC"
 
