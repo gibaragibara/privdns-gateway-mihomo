@@ -8,8 +8,9 @@ SVC=/etc/systemd/system/pdg-bot.service
 [[ -f "$SVC" ]] || { echo "没找到 $SVC —— 先装好 PrivDNS Gateway"; exit 1; }
 
 printf '\e[?2004l'   # 关掉括号粘贴, 防混入转义字符
-read -rp "Telegram bot token: " T
+read -rp "Telegram bot token (留空回车=返回): " T
 T="${T//[$'\r\n\t ']/}"
+[[ -n "$T" ]] || { echo "已取消, 返回。"; exit 0; }
 printf %s "$T" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$' \
   || { echo "❌ token 格式不对(当前长度 ${#T}), 应形如 数字:字母, 未改动。"; exit 1; }
 

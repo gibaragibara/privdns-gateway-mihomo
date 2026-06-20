@@ -48,7 +48,7 @@ cmd_update(){
   c_g "✅ 已更新。$(git -C "$REPO_DIR" log --oneline -1 2>/dev/null)"
 }
 
-cmd_token(){ need_root token; exec pdg-set-token; }
+cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
 cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-probe81"; }
 
@@ -105,11 +105,11 @@ menu(){
   while true; do
     echo; c_g "===== PrivDNS Gateway 管理 ====="
     echo "  1) 状态"
-    echo "  2) 更新到最新 (git pull + 刷新代码, 不动配置/出口/token)"
+    echo "  2) 更新"
     echo "  3) 设置 / 更换 bot token"
     echo "  4) 重启服务"
-    echo "  5) 看日志"
-    echo "  6) iOS 描述文件(二维码, 不用 bot)"
+    echo "  5) 日志"
+    echo "  6) iOS 描述文件"
     echo "  7) 卸载"
     echo "  0) 退出"
     read -rp "选择: " c || exit 0
