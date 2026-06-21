@@ -99,11 +99,13 @@ def _nav(key):
         "exit": ("📤 <b>出口管理</b> — 选一项:", [
             [{"text": "📋 列表", "callback_data": "exits"}, {"text": "➕ 添加", "callback_data": "add_exit"},
              {"text": "🗑 删除", "callback_data": "del_exit"}],
-            [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "🔀 故障切换组", "callback_data": "add_grp"}]]),
+            [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "↕️ 出口排序", "callback_data": "order_exit"}],
+            [{"text": "🔀 新建故障组", "callback_data": "add_grp"}, {"text": "✏️ 改故障组", "callback_data": "edit_grp"}]]),
         "rule": ("📑 <b>分流管理</b> — 选一项:", [
             [{"text": "📋 规则", "callback_data": "rules"}, {"text": "➕ 加规则", "callback_data": "add_rule"},
              {"text": "🗑 删规则", "callback_data": "del_rule"}],
-            [{"text": "📚 加规则集", "callback_data": "add_rs"}, {"text": "🗑 删规则集", "callback_data": "del_rs"}],
+            [{"text": "✏️ 改出口", "callback_data": "edit_rule"}, {"text": "📚 加规则集", "callback_data": "add_rs"},
+             {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
@@ -294,7 +296,11 @@ def add_group(name, members):
     if len(members) < 2:
         return False, "故障切换组至少要 2 个出口"
     def mod(cc):
-        cc["outbounds"] = [o for o in cc["outbounds"] if o.get("tag") != name]
+        for o in cc["outbounds"]:           # 已存在则原地改成员(保留在列表中的位置)
+            if o.get("tag") == name and o.get("type") == "urltest":
+                o["outbounds"] = members
+                o.setdefault("url", DELAY_URL); o.setdefault("interval", "3m"); o.setdefault("tolerance", 50)
+                return
         cc["outbounds"].append({"type": "urltest", "tag": name, "outbounds": members,
                                 "url": DELAY_URL, "interval": "3m", "tolerance": 50})
     ok, msg = apply_sb(mod)
@@ -682,6 +688,66 @@ def del_rule(domain):
         _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
     return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
 
+# ── 改分流规则出口 / 出口排序 / 改故障组 ──
+def editable_rules(c):
+    """可改出口的规则: [(索引, 简短标签)]。含域名规则与规则集规则。"""
+    out = []
+    for i, r in enumerate(c["route"]["rules"]):
+        if "outbound" not in r:
+            continue
+        if r.get("rule_set"):
+            out.append((i, f'{r["outbound"]}: 规则集 {r["rule_set"]}'))
+        else:
+            doms = r.get("domain_suffix", []) + r.get("domain", [])
+            if doms:
+                out.append((i, f'{r["outbound"]}: ' + ", ".join(doms[:4]) + (" …" if len(doms) > 4 else "")))
+    return out
+
+def _merge_domain_rules(rules):
+    """同一出口的多条域名规则合并为一条, 保持其余规则顺序。"""
+    seen = {}; out = []
+    for r in rules:
+        if r.get("outbound") and "rule_set" not in r and (r.get("domain_suffix") or r.get("domain")):
+            t = r["outbound"]
+            if t in seen:
+                base = seen[t]
+                for k in ("domain_suffix", "domain"):
+                    if r.get(k):
+                        base.setdefault(k, [])
+                        base[k] += [x for x in r[k] if x not in base[k]]
+                continue
+            seen[t] = r
+        out.append(r)
+    return out
+
+def reassign_rule(idx, target):
+    c = load(); rules = c["route"]["rules"]
+    if idx < 0 or idx >= len(rules) or "outbound" not in rules[idx]:
+        return False, "该规则已变动, 请重开列表再试"
+    if target not in exit_tags(c):
+        return False, f"出口 {target} 不存在"
+    old = rules[idx]["outbound"]
+    if old == target:
+        return True, f"已经是 {target}, 未改动"
+    def mod(cc):
+        cc["route"]["rules"][idx]["outbound"] = target
+        cc["route"]["rules"] = _merge_domain_rules(cc["route"]["rules"])
+    ok, msg = apply_sb(mod)
+    return ok, (f"✅ 该规则出口 {old} → {target}" if ok else msg)
+
+def reorder_exits(order):
+    c = load(); allt = [o["tag"] for o in c["outbounds"]]
+    order = [t for t in order if t]
+    if set(order) != set(allt):
+        return False, f"必须且只能列全部出口(空格分隔): {', '.join(allt)}"
+    def mod(cc):
+        cc["outbounds"].sort(key=lambda o: order.index(o["tag"]))
+    ok, msg = apply_sb(mod)
+    return ok, (f"✅ 出口顺序已更新: {' › '.join(order)}" if ok else msg)
+
+def urltest_groups(c):
+    return [o["tag"] for o in c["outbounds"] if o.get("type") == "urltest"]
+
 # ── 测域名: 输入域名 → 直连 or 哪个出口(命中哪条规则/规则集) ──
 def _internal_probe_ip():
     """从 mosdns npn_clients 段取一个探测地址(末位 .250), 用作内网卡来源查 mosdns。"""
@@ -1048,6 +1114,38 @@ def handle_cb(chat, mid, data):
     if data == "add_rule":
         state[chat] = "add_rule"
         edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", BACK); return
+    if data == "edit_rule":
+        rs = editable_rules(load())
+        if not rs:
+            edit(chat, mid, "暂无可改的分流规则", BACK); return
+        rows = [[{"text": lbl, "callback_data": f"er:{i}"}] for i, lbl in rs]
+        rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+        edit(chat, mid, "选要改出口的规则:", {"inline_keyboard": rows}); return
+    if data.startswith("er:"):
+        idx = data[3:]
+        rows = [[{"text": t, "callback_data": f"ero:{idx}:{t}"}] for t in exit_tags(load())]
+        rows.append([{"text": "⬅️ 返回主菜单", "callback_data": "menu"}])
+        edit(chat, mid, "改到哪个出口:", {"inline_keyboard": rows}); return
+    if data.startswith("ero:"):
+        _, idx, target = data.split(":", 2)
+        ok, msg = reassign_rule(int(idx), target); edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
+    if data == "order_exit":
+        state[chat] = "order_exit"
+        cur = [o["tag"] for o in load()["outbounds"]]
+        edit(chat, mid, "发新的出口顺序(空格分隔, 含全部出口)。\n"
+             f"当前: <code>{' '.join(cur)}</code>\n例: <code>hk tw jp us auto</code>\n/cancel 取消。", BACK); return
+    if data == "edit_grp":
+        gs = urltest_groups(load())
+        if not gs:
+            edit(chat, mid, "还没有故障组, 先用「🔀 新建故障组」建一个。", BACK); return
+        edit(chat, mid, "选要改的故障组:", kb_pick("egrp", gs)); return
+    if data.startswith("egrp:"):
+        name = data[5:]; state[chat] = "edit_grp:" + name
+        cur = next((o.get("outbounds", []) for o in load()["outbounds"]
+                    if o.get("tag") == name and o.get("type") == "urltest"), [])
+        edit(chat, mid, f"发 <b>{name}</b> 组的新成员(空格分隔, 按顺序, 至少2个)。\n"
+             f"当前: <code>{' '.join(cur) or '空'}</code>\n可选: {', '.join(concrete_tags(load()))}\n"
+             f"例: <code>hk tw us</code>\n/cancel 取消。", BACK); return
     if data == "del_rule":
         state[chat] = "del_rule"
         edit(chat, mid, "发要删除的域名，例 <code>netflix.com</code>。/cancel 取消。", BACK); return
@@ -1218,6 +1316,11 @@ def handle_text(chat, text):
         if len(p) < 3:
             send_plain(chat, "格式: 组名 出口1 出口2 …(至少2个出口)"); return
         ok, msg = add_group(p[0], p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+    if act == "order_exit":
+        ok, msg = reorder_exits(text.replace(",", " ").split()); send_plain(chat, msg if ok else ("❌ " + msg)); return
+    if act.startswith("edit_grp:"):
+        ok, msg = add_group(act.split(":", 1)[1], text.replace(",", " ").split())
+        send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "add_rule":
         p = text.split()
         send_plain(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
