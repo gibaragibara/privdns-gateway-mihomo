@@ -156,11 +156,12 @@ def answer_cb_async(cb_id):
 
 def clear_chat(chat, top_mid):
     """后台删本会话近期消息(私聊里机器人可删双方消息, 仅限 48 小时内)。
-    用 deleteMessages 批量删(每次最多 100 条, 一起消失、无逐条动画); 整批被拒才退回逐条。
+    deleteMessages 批量删(整批一起消失、无逐条动画)。Telegram 规则: 批里只要有一条
+    不可删(如 >48h)整批就失败 → 二分拆开重试, 让能删的仍走批量、只把删不掉的孤立出来。
     独立连接, 不占主 _conn。"""
     if not top_mid:
         return
-    SPAN = 300  # 从 /clear 往前覆盖的消息 id 数(约 3 批)
+    SPAN = 300  # 从 /clear 往前覆盖的消息 id 数
 
     def go():
         conn = [http.client.HTTPSConnection("api.telegram.org", timeout=30)]
@@ -178,19 +179,25 @@ def clear_chat(chat, top_mid):
                 conn[0] = http.client.HTTPSConnection("api.telegram.org", timeout=30)
                 return {}
 
+        calls = [0]
+
+        def bulk(ids):
+            """删 ids; 返回是否删掉了任意一条。整批被拒(含 >48h)就二分。硬上限防空转/429。"""
+            if not ids or calls[0] >= 60:    # 硬上限: 近期(可删)都在最前面几次就删完了, 够用且防空转/429
+                return False
+            calls[0] += 1
+            if call("deleteMessages", {"chat_id": chat, "message_ids": ids}).get("ok"):
+                return True                  # 整批一起消失(无逐条动画)
+            if len(ids) == 1:
+                return False                 # 这条删不掉(>48h/服务消息), 跳过
+            mid = len(ids) // 2              # 新的在前(id 大): 先删新的
+            a = bulk(ids[:mid]); b = bulk(ids[mid:])
+            return a or b
+
         ids = list(range(top_mid, max(0, top_mid - SPAN), -1))
         for i in range(0, len(ids), 100):
-            chunk = ids[i:i + 100]
-            if call("deleteMessages", {"chat_id": chat, "message_ids": chunk}).get("ok"):
-                continue
-            miss = 0                       # 整批被拒(可能含 >48h/不可删的)→ 退回逐条, 连续失败多即停
-            for mid in chunk:
-                if call("deleteMessage", {"chat_id": chat, "message_id": mid}).get("ok"):
-                    miss = 0
-                else:
-                    miss += 1
-                    if miss >= 25:
-                        break
+            if not bulk(ids[i:i + 100]):     # 整窗一条都没删掉 = 已过 48h 边界, 停(不再往更老里翻)
+                break
         try:
             conn[0].close()
         except Exception:  # noqa: BLE001
