@@ -1,0 +1,52 @@
+$ cat /home/codex/privdns-gateway/.github/workflows/ci.yml
+
+name: CI
+
+# 纯静态校验: 不启动 mosdns / sing-box / nftables, 只检查能不能编译 / 语法 / 渲染。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 语法 (py_compile)
+        run: python3 -m py_compile deploy/bot/*.py
+
+      - name: Shell 语法 (bash -n)
+        run: |
+          bash -n install.sh uninstall.sh \
+            deploy/bot/*.sh deploy/cert/*.sh lib/*.sh
+
+      - name: JSON 模板渲染后可解析
+        run: |
+          set -euo pipefail
+          render() {
+            sed -e 's|__SERVER_IP__|203.0.113.1|g' \
+                -e 's|__INTERNAL_CIDR__|172.22.0.0/16|g' \
+                -e 's|__CERT_DIR__|/etc/mosdns/certs|g' \
+                -e 's|__SSH_PORT__|22|g' "$1"
+          }
+          for t in deploy/singbox/config.json.tmpl; do
+            echo "→ 渲染并校验 $t"
+            render "$t" | python3 -m json.tool > /dev/null
+            # jq 在 ubuntu-latest 默认就有, 再用它复核一遍
+            if command -v jq >/dev/null; then render "$t" | jq -e . > /dev/null; fi
+            echo "  OK"
+          done
+
+      - name: ShellCheck (有则跑, 无则给安装提示; 仅提示不阻断)
+        continue-on-error: true
+        run: |
+          if command -v shellcheck >/dev/null; then
+            shellcheck --severity=warning -e SC1091 \
+              install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh
+          else
+            echo "shellcheck 未安装。本地可装: sudo apt-get install -y shellcheck"
+            echo "(GitHub ubuntu-latest 默认自带, 一般会跑到上面的分支)"
+          fi
