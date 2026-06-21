@@ -117,6 +117,7 @@ install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
@@ -131,14 +132,18 @@ fi
 : > /etc/mosdns/rules/custom_direct.txt
 
 render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNAL_CIDR|g" \
-              -e "s|__CERT_DIR__|$CERT_DIR|g"   -e "s|__SSH_PORT__|$SSH_PORT|g" \
-              -e "s|__BOT_TOKEN__|$BOT_TOKEN|g" -e "s|__ALLOWED_IDS__|$ALLOWED_IDS|g" "$1"; }
+              -e "s|__CERT_DIR__|$CERT_DIR|g"   -e "s|__SSH_PORT__|$SSH_PORT|g" "$1"; }
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
 render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json
 render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
-chmod 600 /etc/systemd/system/pdg-bot.service        # 含 token
+chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
+
+# token / 允许 id 写入受限的 bot.env (目录 700 / 文件 600), 不进 unit 也不进版本库
+install -d -m700 /etc/privdns-gateway
+( umask 077; printf 'PDG_BOT_TOKEN=%s\nPDG_BOT_ALLOWED=%s\n' "$BOT_TOKEN" "$ALLOWED_IDS" > /etc/privdns-gateway/bot.env )
+chmod 600 /etc/privdns-gateway/bot.env
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service       /etc/systemd/system/

@@ -14,7 +14,7 @@ echo "保留: /etc/mosdns /etc/sing-box /opt/pdg-bot 与 Let's Encrypt 证书。
 
 if [[ "${1:-}" == "--purge" ]]; then
   echo "[--purge] 删除配置与数据…"
-  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot
+  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway   # /etc/privdns-gateway 含 bot.env(token)
   rm -f /usr/local/bin/mosdns /usr/local/bin/sing-box \
         /usr/local/bin/pdg /usr/local/bin/pdg-set-token \
         /usr/local/bin/proxy-gateway-open-cert-http.sh \

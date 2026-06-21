@@ -1,6 +1,7 @@
 # PrivDNS Gateway
 
-**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / Clash / sing-box 客户端;服务端按域名把流量分到不同落地或直连。
+**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / Clash / sing-box 客户端;
+服务端按域名把流量分到不同落地或直连。
 
 ```
  手机 (Android 私密DNS / iOS 描述文件, 仅 DoT)
@@ -13,7 +14,10 @@
  sing-box ──► 按域名分流: AI/加密→落地A  其余国际→落地B  默认→本机直出
 ```
 
-核心思想:**把 DNS 当策略引擎**。代理域名的 A 记录被改写成网关自己的 IP,流量于是回到网关;sing-box 嗅探 SNI/Host 后再决定走哪个落地。手机全程只有一条「私密 DNS」设置,没有任何客户端、没有 tun。
+核心思想:**把 DNS 当策略引擎**。
+代理域名的 A 记录被改写成网关自己的 IP,流量于是回到网关;
+sing-box 嗅探 SNI/Host 后再决定走哪个落地。
+手机全程只有一条「私密 DNS」设置,没有任何客户端、没有 tun。
 
 ---
 
@@ -22,7 +26,8 @@
 它**不是通用翻墙工具**,依赖一个特定拓扑:
 
 - 一台**墙外 VPS**(网关 + DNS)。
-- 一张运营商「**内网卡 / 定向内网 SIM**」—— 手机的移动流量经运营商私网到达你 VPS,且**源 IP 是固定私有段**(如 `172.x`)。网关靠这个私有源段来区分「该劫持的查询」和别人。
+- 一张运营商「**内网卡 / 定向内网 SIM**」—— 手机的移动流量经运营商私网到达你 VPS,且**源 IP 是固定私有段**(如 `172.x`)。
+  网关靠这个私有源段来区分「该劫持的查询」和别人。
   - 没有这种内网卡 → DNS 劫持会影响到所有查询源,不适用本项目。
 - 一个你能改 DNS 记录的**域名**(给 DoT 用,签 Let's Encrypt 证书)。
 - 一个 **Telegram bot**(管理出口/分流)。
@@ -43,7 +48,9 @@ git clone https://github.com/misaka-cpu/privdns-gateway.git
 cd privdns-gateway && sudo ./install.sh
 ```
 
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。详见 [docs/INSTALL.md](docs/INSTALL.md)。
+脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
+域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
+详见 [docs/INSTALL.md](docs/INSTALL.md)。
 
 卸载:`sudo ./uninstall.sh`(加 `--purge` 连配置一起删)。
 
@@ -54,7 +61,8 @@ cd privdns-gateway && sudo ./install.sh
    - **📤 出口管理 → 添加**:粘贴 `ss:// / vmess:// / trojan:// / vless://` 落地链接。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。蜂窝双卡探测 `:81` 已自动配好。
+3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
+   蜂窝双卡探测 `:81` 已自动配好。
 4. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
@@ -71,6 +79,7 @@ sudo pdg restart    # 重启服务
 sudo pdg log [n]    # 看日志
 sudo pdg traffic    # 网卡流量(vnstat)
 sudo pdg ios        # 不用 bot, 直接出 iOS 描述文件二维码
+sudo pdg report     # 生成脱敏诊断报告(贴给别人排障用, 自动隐藏 token/密码/uuid)
 sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 ```
 

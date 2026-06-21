@@ -1,6 +1,7 @@
 # 排障手册 (Playbook)
 
-出问题先跑一条 **`sudo pdg doctor`** —— 9 项只读检查会直接点出大部分故障(服务、sing-box 版本、DoT A 记录、dot-domain 一致性、内网卡段、防火墙、证书、本机 DNS、sing-box check)。下面是按症状的细查。
+出问题先跑一条 **`sudo pdg doctor`** —— 9 项只读检查会直接点出大部分故障(服务、sing-box 版本、DoT A 记录、dot-domain 一致性、内网卡段、防火墙、证书、本机 DNS、sing-box check)。
+下面是按症状的细查。
 
 ---
 
@@ -13,7 +14,8 @@ iOS 靠描述文件的 OnDemand「探测 `:81` 成功才启用 DoT」。
 ## 手机完全没网(连国内都打不开)
 多半是 mosdns 没在应答。
 - **查**:`sudo pdg doctor` 看「服务 / 本机DNS」;`systemctl status mosdns`;`journalctl -u mosdns -n 30`。
-- **常见根因**:mosdns 证书路径不对(如跨机导入了别人配置,指向不存在的 `/etc/dnsdist/certs`)→ mosdns 崩溃重启。doctor 的「DoT A 记录 / sing-box 配置」也会连带异常。
+- **常见根因**:mosdns 证书路径不对(如跨机导入了别人配置,指向不存在的 `/etc/dnsdist/certs`)→ mosdns 崩溃重启。
+  doctor 的「DoT A 记录 / sing-box 配置」也会连带异常。
 - **修**:把 `/etc/mosdns/config.yaml` 的 `cert:` 指到真实存在的证书(`/etc/mosdns/certs/…`),`systemctl restart mosdns`。
 
 ## 流量没到本机 / 内网卡不通
@@ -22,7 +24,8 @@ iOS 靠描述文件的 OnDemand「探测 `:81` 成功才启用 DoT」。
 
 ## 证书续期失败 / 快到期
 - **查**:`sudo pdg doctor` 的「证书」;`certbot renew --dry-run`。
-- **根因**:① 云厂商安全组挡了入站 **80**(Let's Encrypt HTTP-01 要从公网访问 80);② `dot-domain` 文件与证书 CN 不一致(doctor 的「DoT 域名一致性」会警告)→ 续期会部署错证书。
+- **根因**:① 云厂商安全组挡了入站 **80**(Let's Encrypt HTTP-01 要从公网访问 80);
+  ② `dot-domain` 文件与证书 CN 不一致(doctor 的「DoT 域名一致性」会警告)→ 续期会部署错证书。
 - **修**:① 安全组放行 80;② `echo <证书CN域名> > /opt/pdg-bot/dot-domain`。
 
 ## sing-box 报 "入站字段已废弃" / 行为异常
@@ -34,7 +37,8 @@ iOS 靠描述文件的 OnDemand「探测 `:81` 成功才启用 DoT」。
 
 ## bot 按钮反应慢
 - 点一次按钮 = 2 个到 Telegram 的来回,延迟下限就是本机到 `api.telegram.org` 的 RTT(物理距离,代码压不掉)。
-- 若**又慢又时灵时不灵**:大概率**两台机用同一个 bot token**在抢 getUpdates。一个 token 只能一个实例轮询——要么只在一台跑 `pdg-bot`,要么各用各的 bot。
+- 若**又慢又时灵时不灵**:大概率**两台机用同一个 bot token**在抢 getUpdates。
+  一个 token 只能一个实例轮询——要么只在一台跑 `pdg-bot`,要么各用各的 bot。
 
 ## 流量统计"看着不准"
 - bot 📈流量 的「实时」来自 clash_api = **sing-box 本会话**(重启清零)且**只算经代理的流量**;不是机器总用量。
@@ -42,3 +46,7 @@ iOS 靠描述文件的 OnDemand「探测 `:81` 成功才启用 DoT」。
 
 ## 改坏了想退回
 - `sudo pdg rollback`(默认回最近一次快照;`pdg snapshot` 可手动留底)。`pdg update` 失败会自动回滚。
+
+## 想把现场贴给别人排障
+- `sudo pdg report` 生成一份**脱敏**诊断快照到 `/opt/pdg-bot/pdg-report-*.txt`(600)。
+  已自动隐藏 token / 密码 / uuid / 出口链接;内容含 doctor、服务、日志、版本、端口、证书、A 记录、防火墙。贴出前再扫一眼更稳。

@@ -2,11 +2,22 @@
 """PrivDNS Gateway 健康自检 —— 服务挂 / DNS 不应答 / 证书快到期时 Telegram 私信通知。
 仅在「状态变化」时发(出问题发一次、恢复发一次), 不刷屏。由 pdg-health.timer 定时触发。
 检查逻辑复用 checks.py(与 pdg doctor 同源, 这里只跑轻量子集 checks.ALERT)。
-token / 允许 id 从 pdg-bot.service 读取, 不重复保存。"""
+token / 允许 id 读自 /etc/privdns-gateway/bot.env(回退到环境变量 / 旧 unit), 不重复保存。"""
 import os, re, json, sys
 
-SVC = "/etc/systemd/system/pdg-bot.service"
+ENVF = "/etc/privdns-gateway/bot.env"
+SVC = "/etc/systemd/system/pdg-bot.service"   # 仅作旧装兼容回退
 STATE = "/opt/pdg-bot/health-state.json"
+
+def _envfile(k):
+    try:
+        for line in open(ENVF):
+            line = line.strip()
+            if line.startswith(k + "="):
+                return line[len(k) + 1:].strip().strip('"').strip("'")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
 
 def _svc(k):
     try:
@@ -15,13 +26,16 @@ def _svc(k):
     except Exception:  # noqa: BLE001
         return ""
 
-os.environ.setdefault("PDG_BOT_TOKEN", _svc("PDG_BOT_TOKEN"))
-os.environ.setdefault("PDG_CERT", _svc("PDG_CERT") or "/etc/mosdns/certs/fullchain.pem")
+def _get(k):  # 环境变量 → bot.env → 旧 unit
+    return os.environ.get(k) or _envfile(k) or _svc(k)
+
+os.environ.setdefault("PDG_BOT_TOKEN", _get("PDG_BOT_TOKEN"))
+os.environ.setdefault("PDG_CERT", _get("PDG_CERT") or "/etc/mosdns/certs/fullchain.pem")
 sys.path.insert(0, "/opt/pdg-bot")
 import bot      # noqa: E402  (复用 bot.post 发消息)
 import checks   # noqa: E402  (复用检查逻辑)
 
-ALLOWED = [int(x) for x in re.findall(r"\d+", _svc("PDG_BOT_ALLOWED"))]
+ALLOWED = [int(x) for x in re.findall(r"\d+", _get("PDG_BOT_ALLOWED"))]
 
 def _problems():
     out = []
