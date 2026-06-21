@@ -154,56 +154,6 @@ def answer_cb_async(cb_id):
             pass
     threading.Thread(target=go, daemon=True).start()
 
-def clear_chat(chat, top_mid):
-    """后台删本会话近期消息(私聊里机器人可删双方消息, 仅限 48 小时内)。
-    deleteMessages 批量删(整批一起消失、无逐条动画)。Telegram 规则: 批里只要有一条
-    不可删(如 >48h)整批就失败 → 二分拆开重试, 让能删的仍走批量、只把删不掉的孤立出来。
-    独立连接, 不占主 _conn。"""
-    if not top_mid:
-        return
-    SPAN = 300  # 从 /clear 往前覆盖的消息 id 数
-
-    def go():
-        conn = [http.client.HTTPSConnection("api.telegram.org", timeout=30)]
-
-        def call(method, params):
-            try:
-                conn[0].request("POST", "/bot" + TOKEN + "/" + method, json.dumps(params).encode(),
-                                {"Content-Type": "application/json", "Connection": "keep-alive"})
-                return json.loads(conn[0].getresponse().read() or "{}")
-            except Exception:  # noqa: BLE001
-                try:
-                    conn[0].close()
-                except Exception:  # noqa: BLE001
-                    pass
-                conn[0] = http.client.HTTPSConnection("api.telegram.org", timeout=30)
-                return {}
-
-        calls = [0]
-
-        def bulk(ids):
-            """删 ids; 返回是否删掉了任意一条。整批被拒(含 >48h)就二分。硬上限防空转/429。"""
-            if not ids or calls[0] >= 60:    # 硬上限: 近期(可删)都在最前面几次就删完了, 够用且防空转/429
-                return False
-            calls[0] += 1
-            if call("deleteMessages", {"chat_id": chat, "message_ids": ids}).get("ok"):
-                return True                  # 整批一起消失(无逐条动画)
-            if len(ids) == 1:
-                return False                 # 这条删不掉(>48h/服务消息), 跳过
-            mid = len(ids) // 2              # 新的在前(id 大): 先删新的
-            a = bulk(ids[:mid]); b = bulk(ids[mid:])
-            return a or b
-
-        ids = list(range(top_mid, max(0, top_mid - SPAN), -1))
-        for i in range(0, len(ids), 100):
-            if not bulk(ids[i:i + 100]):     # 整窗一条都没删掉 = 已过 48h 边界, 停(不再往更老里翻)
-                break
-        try:
-            conn[0].close()
-        except Exception:  # noqa: BLE001
-            pass
-    threading.Thread(target=go, daemon=True).start()
-
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
@@ -1412,16 +1362,10 @@ def handle_cb(chat, mid, data):
         ok, msg = del_ruleset(data[6:]); edit(chat, mid, ("✅ " if ok else "") + msg, MENU); return
 
 # ── 文本 ──
-def handle_text(chat, text, mid=0):
+def handle_text(chat, text):
     text = text.strip()
     if text == "/cancel":
         state.pop(chat, None); send_plain(chat, "已取消"); return
-    if text == "/clear":
-        state.pop(chat, None)
-        send_plain(chat, "🧹 正在清屏: 删除近期聊天(节点等敏感信息)…\n"
-                         "Telegram 限制只能删 48 小时内的消息; 本条会留下。")
-        clear_chat(chat, mid)   # 从 /clear 这条往前删, 上面这条提示(更靠后)会保留
-        return
     if text in ("/start", "/menu", "/status"):
         state.pop(chat, None); send(chat, status_text()); return
     if text.startswith("/"):
@@ -1555,8 +1499,7 @@ def main():
     post("deleteWebhook", {"drop_pending_updates": False})
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
-        {"command": "cancel", "description": "取消当前输入"},
-        {"command": "clear", "description": "清屏: 删除近期聊天(节点等敏感信息)"}]
+        {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
     print("pdg-bot v3 started, allowed:", ALLOWED, flush=True)
@@ -1573,7 +1516,7 @@ def main():
                     if m["from"]["id"] not in ALLOWED:
                         continue
                     if "text" in m:
-                        handle_text(m["chat"]["id"], m["text"], m.get("message_id", 0))
+                        handle_text(m["chat"]["id"], m["text"])
                     elif "document" in m:
                         handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:
