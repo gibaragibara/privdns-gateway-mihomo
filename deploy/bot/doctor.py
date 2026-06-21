@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PrivDNS Gateway 体检 —— 只读, 一条命令跑全部检查。
+"""PrivDNS Gateway 自检 —— 只读, 一条命令跑全部检查。
   pdg doctor          人类可读
   pdg doctor --json   JSON 输出
 退出码: 有 fail → 1, 否则 0。"""
@@ -14,7 +14,7 @@ def main():
                          ensure_ascii=False, indent=2))
     else:
         icon = {"ok": "🟢", "warn": "🟡", "fail": "🔴"}
-        print("===== PrivDNS Gateway 体检 =====")
+        print("===== PrivDNS Gateway 自检 =====")
         for l, lb, d in results:
             print(f"  {icon.get(l, '?')} {lb}: {d}")
         nf = sum(1 for l, _, _ in results if l == "fail")

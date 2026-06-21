@@ -167,7 +167,7 @@ cmd_uninstall(){
 menu(){
   while true; do
     echo; c_g "===== PrivDNS Gateway 管理 ====="
-    echo "  1) 状态        2) 体检(doctor)   3) 更新"
+    echo "  1) 状态        2) 自检(doctor)   3) 更新"
     echo "  4) 快照备份    5) 回滚            6) 设置/更换 token"
     echo "  7) 重启服务    8) 日志            9) 流量(vnstat)"
     echo " 10) iOS 描述文件   11) 卸载          0) 退出"

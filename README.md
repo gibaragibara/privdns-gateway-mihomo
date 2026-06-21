@@ -61,7 +61,7 @@ cd privdns-gateway && sudo ./install.sh
 
 ```bash
 sudo pdg            # 进管理菜单
-sudo pdg doctor     # 体检(只读, 一眼看出哪不对); 加 --json 可脚本化
+sudo pdg doctor     # 自检(只读, 一眼看出哪不对); 加 --json 可脚本化
 sudo pdg status     # 状态
 sudo pdg update     # 更新(更新前自动快照, 失败自动回滚; --dry-run 看待更新)
 sudo pdg snapshot   # 手动留一份配置快照

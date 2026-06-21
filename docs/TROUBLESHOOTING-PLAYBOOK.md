@@ -1,6 +1,6 @@
 # 排障手册 (Playbook)
 
-出问题先跑一条 **`sudo pdg doctor`** —— 8 项只读检查会直接点出大部分故障(服务、sing-box 版本、DoT A 记录、dot-domain 一致性、内网卡段、防火墙、证书、本机 DNS、sing-box check)。下面是按症状的细查。
+出问题先跑一条 **`sudo pdg doctor`** —— 9 项只读检查会直接点出大部分故障(服务、sing-box 版本、DoT A 记录、dot-domain 一致性、内网卡段、防火墙、证书、本机 DNS、sing-box check)。下面是按症状的细查。
 
 ---
 

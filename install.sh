@@ -222,7 +222,7 @@ c_g "应用防火墙…"
 systemctl enable nftables >/dev/null 2>&1 || true
 nft -f /etc/nftables.conf
 
-# ── 10. 体检 ──
+# ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
 for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
