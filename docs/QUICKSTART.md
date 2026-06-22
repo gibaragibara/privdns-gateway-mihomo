@@ -2,7 +2,7 @@
 
 面向**第一次部署**的人,一步步带你装好、连上、配好。已经熟悉的直接看 [INSTALL.md](INSTALL.md) 就行。
 
-> 截图占位是 `图N`,实际部署时把对应截图替换进 `docs/images/` 即可。
+> 图片是占位,实际部署时把对应截图放到 `docs/images/` 即可。
 
 ---
 
@@ -24,58 +24,75 @@ VPS 用的是 **kfchost**:
 
 ---
 
-## 2. 准备域名(这一步你自己做)
+## 2. 准备域名
 
 给一个子域(如 `dot.example.com`)加一条 **A 记录指向你 VPS 的公网 IP**。
 
 - **Cloudflare**:务必用「**仅 DNS / 灰云**」,不要开橙云代理。
 - 等生效:`dig +short dot.example.com` 能返回你的 IP 再继续。
 
-![图1 DNS 控制台加 A 记录](images/01-dns.png)
-*图1:在域名控制台把子域 A 记录指向 VPS 公网 IP*
+![DNS 控制台加 A 记录](images/dns.png)
+*在域名控制台把子域 A 记录指向 VPS 公网 IP*
 
 ---
 
-## 3. 建 Telegram bot,拿 token 和 user id
+## 3. 注册并绑定 5GPN 门户
 
-1. Telegram 找 **@BotFather** → `/newbot` → 按提示起名 → 拿到 **token**(形如 `123456:AA...`)。
-2. Telegram 找 **@userinfobot** → 它直接回你的 **user id**(一串数字)。
+手机与 VPS 之间的私网连通,由 kfchost 的 **5GPN** 提供。开通流程:
 
-![图2 BotFather 建 bot 拿 token](images/02-botfather.png)
-*图2:@BotFather 创建 bot 并拿到 token*
+1. 登录 [kfchost 控制台](https://kfchost.com/center/),打开你已购买的那台 VPS。
+2. 在下方「**增值服务 → 5GPN**」里点「**生成链接**」,再点「**打开门户**」,浏览器会跳到 5GPN 网站。
+3. 在 5GPN 网站**注册账号**(邮箱和 kfchost 用同一个或另一个都行)。
+
+![5GPN 入口与门户](images/5gpn-portal.png)
+*VPS 控制台 增值服务 → 5GPN → 生成链接 → 打开门户*
+
+4. 注册后在门户里完成**与本机 VPS 的绑定**,并按门户指引在**手机侧**配置好 5GPN(具体以你看到的门户界面为准)。
+
+![5GPN 绑定 / 手机端配置](images/5gpn-bind.png)
+*5GPN 门户绑定与手机端配置*
+
+> <!-- TODO: 这里按你实际的 5GPN 门户/手机端步骤补充细节 + 截图 -->
+> 配好后,手机走这张 SIM 的流量才会以**固定私有源段**到达你的 VPS——这是后面分流能生效的前提。
 
 ---
 
 ## 4. 一键安装
 
-SSH 登录你的 VPS,跑:
+SSH 登录 VPS,跑:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
 ```
 
 过程中它会:
-1. **自动检测**公网 IP、SSH 端口、内网卡来源段(抓包识别,期间用手机走内网卡访问一次本机)。
+1. **自动检测**公网 IP、SSH 端口、内网卡来源段(抓包识别,期间用手机走这张 SIM 访问一次本机)。
 2. 让你填 **bot token / 你的 user id / DoT 域名**(token 可留空,装完再设)。
 3. 确认 A 记录生效后自动签 Let's Encrypt 证书,起服务、应用防火墙。
 
-![图3 安装过程](images/03-install.png)
-*图3:install.sh 运行过程*
+![安装过程](images/install.png)
+*install.sh 运行过程*
 
 > 抓内网卡段那步若没抓到:先随便填(如 `172.22.0.0/16`),装完用 `sudo pdg detect-cidr` 从容重测并写回。
 
 ---
 
-## 5. 启用管理 bot(如果安装时跳过了 token)
+## 5. 建 Telegram bot 并启用管理
 
-```bash
-sudo pdg-set-token
-```
+1. Telegram 找 **@BotFather** → `/newbot` 起名 → 拿到 **token**;再找 **@userinfobot** 拿你的 **user id**。
 
-按提示粘 token 和你的 user id。**出口、分流规则都在 Telegram bot 里设,所以这步必须做**,否则没法配。
+   ![BotFather 建 bot 拿 token](images/botfather.png)
+   *@BotFather 创建 bot 并拿到 token*
 
-![图4 设置 token](images/04-set-token.png)
-*图4:sudo pdg-set-token 设置并启用 bot*
+2. VPS 上跑(若安装时已填 token 可跳过):
+
+   ```bash
+   sudo pdg-set-token
+   ```
+   按提示粘 token 和 user id。**出口、分流规则都在 bot 里设,这步必须做**,否则没法配。
+
+   ![设置 token](images/set-token.png)
+   *sudo pdg-set-token 设置并启用 bot*
 
 ---
 
@@ -83,14 +100,14 @@ sudo pdg-set-token
 
 **Android**:设置 → 网络和互联网 → **私人 DNS** → 选「指定主机名」→ 填你的域名 `dot.example.com`。
 
-![图5 Android 私人 DNS](images/05-android-dns.png)
-*图5:Android 私人 DNS 填域名*
+![Android 私人 DNS](images/android-dns.png)
+*Android 私人 DNS 填域名*
 
-**iOS**:Telegram 里给 bot 发 `/start` → **📱 客户端 → iOS 描述文件**,把文件存到「文件」App 再到 设置→通用→描述文件 安装;
-不用 bot 也行,VPS 上跑 `sudo pdg ios` 直接出二维码,手机(走内网卡)扫码安装。
+**iOS**:Telegram 给 bot 发 `/start` → **📱 客户端 → iOS 描述文件**,存到「文件」App 再去 设置→通用→描述文件 安装;
+不用 bot 也行,VPS 上跑 `sudo pdg ios` 直接出二维码,手机(走这张 SIM)扫码安装。
 
-![图6 iOS 描述文件](images/06-ios-profile.png)
-*图6:iOS 安装描述文件 / 扫码*
+![iOS 描述文件](images/ios-profile.png)
+*iOS 安装描述文件 / 扫码*
 
 ---
 
@@ -98,20 +115,20 @@ sudo pdg-set-token
 
 Telegram 给 bot 发 `/start`,出现主菜单:
 
-![图7 bot 主菜单](images/07-bot-menu.png)
-*图7:bot `/start` 主菜单*
+![bot 主菜单](images/bot-menu.png)
+*bot `/start` 主菜单*
 
 - **📤 出口管理 → ➕ 添加**:粘贴你的落地节点链接(`ss:// / vmess:// / trojan:// / vless://`)。
-  ![图8 添加出口](images/08-add-exit.png)
-  *图8:粘贴落地节点链接添加出口*
+  ![添加出口](images/add-exit.png)
+  *粘贴落地节点链接添加出口*
 
 - **📑 分流管理**:把域名或规则集指到某个出口;不指的默认走「其余国际」的默认出口。
-  ![图9 分流管理](images/09-rules.png)
-  *图9:把域名/规则集指到出口*
+  ![分流管理](images/rules.png)
+  *把域名/规则集指到出口*
 
 - **🚦 测出口**:看各出口的延迟、是否可用。
-  ![图10 测出口](images/10-test.png)
-  *图10:测各出口延迟*
+  ![测出口](images/test.png)
+  *测各出口延迟*
 
 ---
 
@@ -119,8 +136,8 @@ Telegram 给 bot 发 `/start`,出现主菜单:
 
 VPS 上 `sudo pdg` 进管理菜单(状态 / 自检 / 更新 / 快照回滚 / 换 token / 日志 / 流量 / 识别内网卡段 / 卸载):
 
-![图11 pdg 管理菜单](images/11-pdg-menu.png)
-*图11:`sudo pdg` 管理菜单*
+![pdg 管理菜单](images/pdg-menu.png)
+*`sudo pdg` 管理菜单*
 
 常用:
 ```bash
