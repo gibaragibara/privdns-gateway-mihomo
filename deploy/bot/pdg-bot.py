@@ -509,7 +509,9 @@ def set_wda_mode(on):
     ok, msg = apply_sb(mod)
     if not ok:
         if on:
-            _write_unlock_file([])   # 回滚: sing-box 没开成, 把刚写满的 unlock.txt 清掉, 别留"mosdns已写但sing-box没开"的残留
+            okc, errc = _write_unlock_file([])   # 回滚: sing-box 没开成, 把刚写满的 unlock.txt 清掉
+            if not okc:                          # 连回滚清空都失败 → 别静默, 明确告知 mosdns 侧可能残留
+                msg += "\n⚠️ 且回滚清空 unlock.txt 也失败(" + errc + "): mosdns 侧可能仍残留解锁清单, 请重试或手动清空。"
         return False, msg
     if on:
         return True, ("✅ 已切到【🔓 WDA 解锁】: %d 个域名走 WDA(jp 直出 + 22.22.22.22 中继)。\n"
