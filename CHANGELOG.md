@@ -2,6 +2,11 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-24 — sing-box 锁定版升到 1.12.25(1.12.x 最高补丁版)
+
+- **`lib/versions.sh`: `SINGBOX_VER` 1.12.9 → 1.12.25**(当前 1.12.x 最高;仍是 1.12.x,`sniff_override_destination` 在,**不碰 1.13**)。同步更新 amd64/arm64 SHA256。十几个补丁版的 bug/安全修复。
+- 两台线上对齐到 1.12.25(`pdg update` 不动二进制,手动换 + 校验 SHA256 + 重启 + 回滚兜底);新装直接装 1.12.25;CI 的 schema 校验也对 1.12.25 跑。
+
 ## 2026-06-24 — 出口支持更多协议链接(hysteria2/tuic/vless-reality/anytls/socks5/http)
 
 - **bot「📤 出口管理 → 添加」新增解析**:`hysteria2://`(含 sni/insecure/obfs)、`tuic://`(uuid:pass、alpn/congestion_control)、`anytls://`、`socks5://`、`http(s)://`,并**扩展 `vless://` 认 Reality**(`pbk`→`reality.public_key`、`sid`→`short_id`、`fp`→`utls.fingerprint`、`flow`)。`PROXY_TYPES` 同步扩容,新协议出口可正常选默认/进故障组/测出口/删除。
