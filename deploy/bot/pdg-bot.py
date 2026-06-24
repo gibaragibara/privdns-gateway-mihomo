@@ -309,14 +309,14 @@ def _tls_block(server_name, insecure=False):
         b["insecure"] = True
     return b
 
-def _transport(net, host, path):
+def _transport(net, host, path, service=None):
     if net in ("ws", "websocket"):
         t = {"type": "ws", "path": path or "/"}
         if host:
             t["headers"] = {"Host": host}
         return t
-    if net == "grpc":
-        return {"type": "grpc", "service_name": (path or "").lstrip("/")}
+    if net == "grpc":                                 # 分享链接 grpc 服务名多在 serviceName=/service_name=, 不在 path
+        return {"type": "grpc", "service_name": service or (path or "").lstrip("/")}
     return None
 
 def _parse_vmess(link):
@@ -339,7 +339,8 @@ def _parse_trojan(link):
     ob = {"type": "trojan", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
           "server": u.hostname, "server_port": u.port or 443, "password": urllib.parse.unquote(u.username or "")}
     ob["tls"] = _tls_block(q.get("sni") or q.get("peer") or u.hostname, q.get("allowInsecure") in ("1", "true"))
-    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"))
+    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"),
+                    q.get("serviceName") or q.get("service_name"))
     if tr:
         ob["transport"] = tr
     return ob
@@ -357,7 +358,8 @@ def _parse_vless(link):
             ob["tls"]["reality"] = {"enabled": True, "public_key": q.get("pbk", ""), "short_id": q.get("sid", "")}
         if q.get("fp"):
             ob["tls"]["utls"] = {"enabled": True, "fingerprint": q["fp"]}
-    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"))
+    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"),
+                    q.get("serviceName") or q.get("service_name"))
     if tr:
         ob["transport"] = tr
     return ob

@@ -5,7 +5,8 @@
 ## 2026-06-24 — 出口支持更多协议链接(hysteria2/tuic/vless-reality/anytls/socks5/http)
 
 - **bot「📤 出口管理 → 添加」新增解析**:`hysteria2://`(含 sni/insecure/obfs)、`tuic://`(uuid:pass、alpn/congestion_control)、`anytls://`、`socks5://`、`http(s)://`,并**扩展 `vless://` 认 Reality**(`pbk`→`reality.public_key`、`sid`→`short_id`、`fp`→`utls.fingerprint`、`flow`)。`PROXY_TYPES` 同步扩容,新协议出口可正常选默认/进故障组/测出口/删除。
-- **验证**:`tests/test-parse-links.py`(进 CI)对各协议断言字段映射;另在真机用 **`sing-box check`(1.12.25)逐一校验**生成的出站合法(rc=0)。⚠️ 连通性需各自拿真实节点测(解析+配置合法已保证)。
+- **修 gRPC 服务名**:`_transport` 现从 `serviceName` / `service_name` / `path` 三者取 grpc service_name(原先只看 `path`;vless/vmess 的 grpc 分享链接多用 `serviceName=`,会丢导致连不上)。
+- **验证(两层、都进 CI)**:`tests/test-parse-links.py` 断言各协议字段映射(含 gRPC serviceName);`tests/test-outbound-schema.sh` **下载项目锁定版 sing-box(`SINGBOX_VER`=1.12.9、钉死 SHA256)对 parse_link 生成的全部出站跑 `sing-box check`**——只测解析 dict 不够,字段名要跟锁定版 schema 对得上(常随版本小变)。⚠️ 连通性仍需各自拿真实节点测。
 - 仍走手写 config 的:`shadowtls`(无标准链接)、`ssh`(无链接)、`wireguard`(1.12 是 `endpoints`)。
 
 ## 2026-06-24 — 出口支持粘贴 Surge 的 ss 行

@@ -73,6 +73,12 @@ check("vless:// reality",
       tls__server_name="www.microsoft.com", tls__reality__enabled=True, tls__reality__public_key="PUBKEY",
       tls__reality__short_id="ab12", tls__utls__fingerprint="chrome")
 
+# vless gRPC: serviceName= 要进 transport.service_name(不是只看 path)
+check("vless:// grpc serviceName",
+      m.parse_link("vless://11111111-2222-3333-4444-555555555555@g.example.com:443?"
+                   "security=tls&type=grpc&serviceName=mygrpc&sni=g.example.com#GRPC"),
+      type="vless", transport__type="grpc", transport__service_name="mygrpc")
+
 # anytls
 check("anytls://", m.parse_link("anytls://atpass@a.example.com:443?sni=a.example.com#ANYTLS"),
       type="anytls", server="a.example.com", server_port=443, password="atpass", tls__server_name="a.example.com")
