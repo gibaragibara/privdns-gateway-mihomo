@@ -79,7 +79,7 @@ jobs:
       - name: "mosdns concurrent 迁移回归 (单上游=1/多上游=2/幂等)"
         run: bash tests/test-mosdns-concurrent.sh
 
-      - name: "parse_link 回归 (ss/Surge 行解析)"
+      - name: "parse_link 多协议回归 (各协议链接 + Surge ss 行字段映射)"
         run: python3 tests/test-parse-links.py
 
   functional:
