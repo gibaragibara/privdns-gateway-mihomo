@@ -963,8 +963,8 @@ def _git(*args, t=60):
 def update_check():
     """git fetch + 列 HEAD..origin/main 待更新提交。返回 (有更新?, 文本)。"""
     try:
-        _git("fetch", "-q", "origin", "main")
-        cur = _git("rev-parse", "--short", "HEAD").stdout.strip()
+        _git("fetch", "-q", "--tags", "origin", "main")
+        cur = _git("describe", "--tags", "--always").stdout.strip()
         log = _git("log", "--oneline", "HEAD..origin/main").stdout.strip()
     except Exception as e:  # noqa: BLE001
         return False, f"检查更新失败: {e}"

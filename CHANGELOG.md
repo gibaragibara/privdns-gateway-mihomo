@@ -2,6 +2,11 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-24 — v1.1.0(版本显示改 git describe)
+
+- `pdg status` 的「代码版本」与 bot『🔄 更新』检查里的「当前」从 commit hash 改为 **`git describe --tags`**:在 tag 上显示 `v1.1.0`,领先 tag 则 `v1.1.0-N-g<hash>`。`pdg update` 与检查更新的 `git fetch` 加 `--tags`,确保各机能拿到 tag 供 describe。
+- **打 tag `v1.1.0`**。自 v1.0.0 起累计:WDA 流媒体/服务解锁开关、出口多协议解析(hysteria2/tuic/vless-reality/anytls/socks5/http + Surge ss 行)、防火墙独立表 `inet pdg` + 幂等迁移、mosdns 多厂商上游 + `concurrent` 故障转移、DNS 层/解析/迁移多项回归测试入 CI、sing-box 锁定 1.12.25,以及大量评审加固。
+
 ## 2026-06-24 — sing-box 锁定版升到 1.12.25(1.12.x 最高补丁版)
 
 - **`lib/versions.sh`: `SINGBOX_VER` 1.12.9 → 1.12.25**(当前 1.12.x 最高;仍是 1.12.x,`sniff_override_destination` 在,**不碰 1.13**)。同步更新 amd64/arm64 SHA256。十几个补丁版的 bug/安全修复。

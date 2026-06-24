@@ -32,7 +32,7 @@ cmd_status(){
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   echo "  监听端口     $(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090)\b' | sort -u | tr '\n' ' ')"
-  if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null)"; fi
+  if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
 }
 
 cmd_doctor(){ python3 /opt/pdg-bot/doctor.py "$@"; }
@@ -275,7 +275,7 @@ cmd_update(){
   need_root update
   command -v git >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git; }
   if [[ "${1:-}" == "--dry-run" ]]; then
-    [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" fetch -q origin main 2>/dev/null
+    [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" fetch -q --tags origin main 2>/dev/null
     echo "待更新的提交(HEAD..origin/main):"
     git -C "$REPO_DIR" log --oneline HEAD..origin/main 2>/dev/null || echo "  (已是最新, 或无法比较)"
     return 0
@@ -284,7 +284,7 @@ cmd_update(){
   c_g "更新前留快照…"; cmd_snapshot >/dev/null 2>&1 || true
   c_g "拉取最新代码…"
   if [[ -d "$REPO_DIR/.git" ]]; then
-    git -C "$REPO_DIR" fetch -q origin main && git -C "$REPO_DIR" reset --hard -q origin/main
+    git -C "$REPO_DIR" fetch -q --tags origin main && git -C "$REPO_DIR" reset --hard -q origin/main
   else
     rm -rf "$REPO_DIR"; git clone -q --depth 1 "$REPO_URL" "$REPO_DIR"
   fi
