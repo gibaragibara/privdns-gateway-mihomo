@@ -411,6 +411,7 @@ def set_mosdns_upstream(which, addrs):
 # mosdns 侧的 unlock 支(unlock_upstream + geosite_unlock)是常驻的(install/迁移装好), 平时休眠;
 # 本函数只在 WDA 模式把域名清单写进 mosdns 的 unlock.txt 与 sing-box 的 rule_set, 并加 sing-box 路由规则。
 MOSDNS_RULES = "/etc/mosdns/rules"
+UNLOCK_DNS = "22.22.22.22"   # 解锁服务(WDA)的 DNS; 与 mosdns unlock_upstream 一致。换厂商需同步两处。
 WDA_DOMAINS = [
     # 流媒体
     "netflix.com", "netflix.net", "nflxvideo.net", "nflximg.net", "nflxext.com", "nflxso.net",
@@ -433,6 +434,25 @@ def _wda_on(c=None):
     c = c or load()
     return any(r.get("rule_set") == "unlock" and r.get("outbound") == "jp"
                for r in c.get("route", {}).get("rules", []))
+
+def _server_ip():
+    """本机公网 IP(从 sing-box 的 reject 规则取); 用于提示去解锁服务后台授权哪个 IP。"""
+    try:
+        for r in load().get("route", {}).get("rules", []):
+            if r.get("action") == "reject":
+                for x in r.get("ip_cidr", []):
+                    if x.endswith("/32") and not x.startswith("127."):
+                        return x.split("/")[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return "本机公网IP"
+
+def _wda_authorized():
+    """探测本机 IP 是否已在解锁服务后台授权: 解锁 DNS 对 Netflix 判别域名返回"中继"
+    (与解锁 DNS 同 /24 的 IP)即已授权。没订阅/没加白/DNS 不通 → False。"""
+    net24 = UNLOCK_DNS.rsplit(".", 1)[0] + "."
+    out = sh(["dig", "+short", "+time=3", "+tries=2", "@" + UNLOCK_DNS, "nflxso.net", "A"]).stdout
+    return any(ln.strip().startswith(net24) for ln in out.splitlines())
 
 def _sync_unlock_domains():
     """把 WDA_DOMAINS 写进 mosdns unlock.txt(domain: 前缀); 内容变了才重启 mosdns(失败回滚)。"""
@@ -463,6 +483,12 @@ def _sync_unlock_domains():
 
 def set_wda_mode(on):
     if on:
+        if not _wda_authorized():               # 没授权就开 = 流媒体走 jp 直出但拿不到中继, 反而更糟 → 先拦住
+            ip = _server_ip()
+            return False, ("⚠️ 没在解锁 DNS(%s)上测到本机的中继, <b>先别开 WDA</b>(否则解锁服务拿不到中继, 流媒体反而可能挂)。\n"
+                           "常见原因: 没订阅解锁服务 / 没在服务商<b>后台把本机公网 IP <code>%s</code> 加白授权</b> / DNS 不通。\n"
+                           "→ 去服务商后台授权本机 IP <code>%s</code>, 再点 🔓。(未改动, 仍走落地出口)"
+                           % (UNLOCK_DNS, ip, ip))
         ok, err = _sync_unlock_domains()
         if not ok:
             return False, err
@@ -1502,7 +1528,8 @@ def handle_cb(chat, mid, data):
              f"国内(local): <code>{', '.join(loc) or '?'}</code>\n\n"
              f"<b>流媒体/服务解锁</b>: 当前 <b>{mode}</b>\n"
              "• 🛬 落地出口: 解锁服务走各自落地(hk/tw)\n"
-             "• 🔓 WDA: WDA 能解锁的整体走 WDA(jp 直出 + 解锁 DNS)\n\n"
+             "• 🔓 WDA: WDA 能解锁的整体走 WDA(jp 直出 + 解锁 DNS)\n"
+             f"  ⚠️ 开 WDA 前先去解锁服务后台授权本机 IP <code>{_server_ip()}</code>(没授权点 🔓 会被拦下)\n\n"
              "改上游: 发「<b>remote 地址…</b>」或「<b>local 地址…</b>」(空格分隔多个)\n/cancel 取消。",
              {"inline_keyboard": [
                  [{"text": "🛬 解锁走落地出口", "callback_data": "wda:off"},

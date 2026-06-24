@@ -129,6 +129,19 @@ sudo PDG_NONINTERACTIVE=1 \
 - **改过防火墙的不会被自动重建**:迁移是用标准模板重建(只保留 SSH 端口 + 内网段)。若你在旧 `/etc/nftables.conf` 里**手动加过端口/规则/别的 table**,自动迁移会**检测到并跳过**(避免静默丢失),旧配置原样保留。届时请把自定义规则并入 `deploy/firewall/nftables.conf` 同风格后手动 `nft -f`,或 `sudo pdg migrate-fw` 迁标准部分后再补回自定义规则。
 - 即使**尚未迁移**也能正常用:证书续期 hook 与 `doctor` 都兼容旧 `inet filter`。
 
+## 流媒体/服务解锁(WDA,可选)
+
+如果你的 VPS 厂商提供 **SmartDNS 解锁(WDA)** 服务,可在 bot『🌐 DNS 上游』用两个按钮整体切换:
+
+- **🛬 解锁走落地出口**(默认):Netflix/Disney+/AI 等走各自分流出口(hk/tw)。
+- **🔓 解锁走 WDA**:这些服务整体 → **本机(jp)直出** + 经解锁 DNS 解析到中继。中继是干净 IP,能避开 Netflix 对机房裸 IP 的代理封锁。
+
+**开 WDA 前必须先在解锁服务商后台,把本机公网 IP 加白授权**(解锁按 IP 授权;多台网关要**每台 IP 各自加白**)。没授权就点 🔓,bot 会**自检后拦下并提示**(避免解锁服务拿不到中继、流媒体反而挂)。
+
+- 解锁地区取决于你在厂商面板选的平台(VPS 在日本→选 JP 平台→日本区)。
+- 解锁 DNS 默认对接 `22.22.22.22`(本项目所用厂商)。换别家解锁服务需同步改 `deploy/mosdns/config.yaml` 的 `unlock_upstream` 与 `deploy/bot/pdg-bot.py` 的 `UNLOCK_DNS`。
+- 某个服务在 WDA 下不灵,点 🛬 整体切回落地即可(目前是整体开关,非按服务)。
+
 ## 卸载
 
 ```bash

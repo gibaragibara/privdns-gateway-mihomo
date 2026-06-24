@@ -8,6 +8,7 @@
   - 🔓 WDA:一批可解锁的服务域名(Netflix/Disney+/Prime/AppleTV/YouTube/Dazn/U-NEXT/iQiyi/TVBAnywhere/DMM + OpenAI/Claude/Gemini + Steam 等)整体 → **jp 直出**(从 VPS 被授权 IP 出)+ 经 mosdns 用**解锁 DNS `22.22.22.22`** 解析到中继。其余流量照常分流。
   - 🛬 落地:撤掉规则,这些域名回落各自现有出口(hk/tw)。
 - **mosdns 加常驻"解锁支"**(平时休眠):`unlock_upstream`(22.22.22.22, concurrent 1) + `geosite_unlock`(读 `unlock.txt`) + main_sequence 一条「**本机查询**命中解锁域名 → 解锁 DNS」的支(带 `jump has_resp`,否则答案会被 `remote_upstream` 覆盖——实测踩过)。只对 sing-box 直出的本机查询生效,手机劫持路径不变。
+- **开 WDA 前自检授权**:点 🔓 时先探测解锁 DNS 是否对本机返回中继(本机 IP 已在服务商后台加白),**没授权就拦下并提示去后台授权本机 IP**——避免"没授权却开 WDA → 拿不到中继、流媒体反而挂"。DNS 上游页也直接显示要授权的本机 IP。docs/INSTALL.md 加「流媒体/服务解锁(WDA)」节。
 - **旧装自动迁移** `migrate_mosdns_unlock`(随管理类 pdg 命令幂等补该支);install 建空 `unlock.txt`(空=休眠,不改现有行为)。
 - **测试**:dns-policy-test 加「解锁域名经本机 → 解锁 DNS(非普通上游)」断言,正好回归 `jump has_resp`。
 - 说明:解锁地区取决于厂商面板选的平台(VPS 在日本→JP 平台→日本区);解锁的价值在于**中继是干净 IP**,避开 Netflix 对机房 IP 的代理封锁。
