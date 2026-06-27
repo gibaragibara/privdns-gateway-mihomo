@@ -1541,7 +1541,7 @@ def handle_cb(chat, mid, data):
     if data == "doctor":
         edit(chat, mid, "🩺 自检中(几秒)…", None); edit(chat, mid, doctor_text(), BACK); return
     if data == "upd_check":
-        edit(chat, mid, "🔄 检查更新中…", None)
+        edit(chat, mid, "🔄 检查更新中…", BACK)
         has, txt = update_check()
         kb = ({"inline_keyboard": [[{"text": "✅ 确认更新", "callback_data": "upd_apply"}],
                                    [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]} if has else BACK)
@@ -1701,8 +1701,9 @@ def handle_cb(chat, mid, data):
              "改上游: 发「<b>remote 地址…</b>」或「<b>local 地址…</b>」(空格分隔多个)\n/cancel 取消。",
              {"inline_keyboard": [
                  [{"text": "🛬 解锁走落地出口", "callback_data": "wda:off"},
-                  {"text": "🔓 解锁走 WDA", "callback_data": "wda:on"}],
-                 [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}]]}); return
+                 {"text": "🔓 解锁走 WDA", "callback_data": "wda:on"}],
+                 [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data in ("wda:on", "wda:off"):
         edit(chat, mid, "正在切换解锁模式…", None)
         ok, msg = set_wda_mode(data == "wda:on")
@@ -1907,11 +1908,10 @@ def main():
                         handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:
                     q = u["callback_query"]
-                    # 先改内容(handle_cb 里的 edit), 停转圈(answerCallbackQuery)丢后台:
-                    # 主循环 edit 完即回 getUpdates, 连点菜单不再每次多等一个'停转圈'来回。
+                    # 先停按钮转圈, 再跑可能较慢的 handle_cb(检查更新/测出口/自检等)。
+                    answer_cb_async(q["id"])
                     if q["from"]["id"] in ALLOWED:
                         handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])
-                    answer_cb_async(q["id"])
             except Exception as e:  # noqa: BLE001
                 print("handle err", e, flush=True)
 

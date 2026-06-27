@@ -53,3 +53,18 @@ assert_near('if data == "test":', 'edit(chat, mid, "测试中…", BACK)', (
 assert 'edit(chat, mid, "测试中…", None)' not in bot, (
     "passing None to edit() falls back to the full first-level MENU"
 )
+assert_near('if data == "upd_check":', 'edit(chat, mid, "🔄 检查更新中…", BACK)', (
+    "update-check progress message should show only a back button, not the full first-level menu"
+))
+assert 'edit(chat, mid, "🔄 检查更新中…", None)' not in bot, (
+    "passing None to edit() falls back to the full first-level MENU"
+)
+assert_near('if data == "dnsup":', '"callback_data": "menu"', (
+    "DNS upstream page should include a main-menu button"
+), window=1600)
+
+callback_block = bot[bot.find('elif "callback_query" in u:'):]
+answer_pos = callback_block.find('answer_cb_async(q["id"])')
+handle_pos = callback_block.find('handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])')
+assert answer_pos >= 0 and handle_pos >= 0, "callback loop should answer and handle callback queries"
+assert answer_pos < handle_pos, "answerCallbackQuery should be sent before slow callback handling"
