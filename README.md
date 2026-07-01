@@ -1,6 +1,6 @@
 # PrivDNS Gateway
 
-**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / Clash / sing-box 客户端;
+**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / 代理客户端;
 服务端按域名把流量分到不同落地或直连。
 
 > 🚀 **第一次部署?** 跟着 **[新手图文教程 →](docs/QUICKSTART.md)** 一步步来(从买 VPS 到手机连上,全程带图)。
@@ -55,7 +55,7 @@ git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
 sudo ./install.sh
 ```
 
-脚本会装好 mosdns、mihomo(TPROXY)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
+脚本会装好 mosdns、mihomo TPROXY、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
 域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
 详见 [docs/INSTALL.md](docs/INSTALL.md)。
 
@@ -104,14 +104,14 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
 | 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
 | 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
-| 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 mihomo TPROXY 占的坑) |
+| 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |
 | 防火墙 | **nftables** | 对全网只留 SSH;DNS/探测/管理口只放行内网卡来源段;内网 tcp/udp TPROXY 到 mihomo |
 
 ## 文档
 
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/production-notes.md](docs/production-notes.md) — 上游 sing-box 版实战记录;本 fork 已切到 mihomo TPROXY
+- [docs/production-notes.md](docs/production-notes.md) — 实战记录 / 架构背景
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志
 
 ## 免责声明

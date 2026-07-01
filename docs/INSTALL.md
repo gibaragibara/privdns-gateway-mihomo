@@ -20,7 +20,7 @@
 一行装(脚本会自动把仓库拉到 `/opt/privdns-gateway` 再跑):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gibaragibara/privdns-gateway-mihomo/main/install.sh | sudo bash
 ```
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
@@ -28,8 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 或克隆后运行:
 
 ```bash
-git clone https://github.com/misaka-cpu/privdns-gateway.git
-cd privdns-gateway
+git clone https://github.com/gibaragibara/privdns-gateway-mihomo.git
+cd privdns-gateway-mihomo
 git fetch --tags
 git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
 sudo ./install.sh
