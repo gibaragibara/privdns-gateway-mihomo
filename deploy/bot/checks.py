@@ -3,7 +3,8 @@
 每个 check() 返回 (level, label, detail), level ∈ 'ok'|'warn'|'fail'|'info'。只读, 不改任何东西。"""
 import os, re, json, ipaddress, subprocess, urllib.request
 
-SB = "/etc/sing-box/config.json"
+STATE = "/etc/mihomo/state.json"
+MIHOMO_CFG = "/etc/mihomo/config.yaml"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
 
@@ -22,7 +23,7 @@ def _mos():
 
 def _server_ip():
     try:
-        for r in json.load(open(SB)).get("route", {}).get("rules", []):
+        for r in json.load(open(STATE)).get("route", {}).get("rules", []):
             if r.get("action") == "reject":
                 for x in r.get("ip_cidr", []):
                     if x.endswith("/32") and not x.startswith("127."):
@@ -55,22 +56,17 @@ def _dot_file():
         return ""
 
 def check_services():
-    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-probe81")
+    bad = [s for s in ("mosdns", "mihomo", "pdg-bot", "pdg-probe81")
            if _run(["systemctl", "is-active", s])[1].strip() != "active"]
     return ("fail", "服务", "未运行: " + ", ".join(bad)) if bad \
-        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-probe81 都在")
+        else ("ok", "服务", "mosdns/mihomo/pdg-bot/pdg-probe81 都在")
 
-def check_singbox_version():
-    _, out, _ = _run(["sing-box", "version"])
-    m = re.search(r"version\s+(\d+)\.(\d+)", out)
+def check_mihomo_version():
+    _, out, _ = _run(["mihomo", "-v"])
+    m = re.search(r"v(\d+\.\d+\.\d+)", out)
     if not m:
-        return ("warn", "sing-box 版本", "读不到版本")
-    major, minor = int(m.group(1)), int(m.group(2)); v = f"{major}.{minor}"
-    if (major, minor) == (1, 12):
-        return ("ok", "sing-box 版本", v + ".x ✓")
-    if (major, minor) >= (1, 13):
-        return ("fail", "sing-box 版本", v + " 太新! 1.13+ 移除了 sniff_override_destination, 网关失效, 须降回 1.12.x")
-    return ("warn", "sing-box 版本", v + " 偏旧, 建议 1.12.x")
+        return ("warn", "mihomo 版本", "读不到版本")
+    return ("ok", "mihomo 版本", m.group(1) + " ✓")
 
 def check_dot_arecord():
     d = _dot_domain(); sip = _server_ip()
@@ -143,10 +139,10 @@ def check_dns():
     return ("ok", "本机DNS", "mosdns 应答正常") if out.strip() \
         else ("fail", "本机DNS", "127.0.0.1:53 不应答(mosdns?)")
 
-def check_singbox_config():
-    rc, out, err = _run(["sing-box", "check", "-c", SB], t=20)
-    return ("ok", "sing-box 配置", "check 通过") if rc == 0 \
-        else ("fail", "sing-box 配置", "check 失败: " + (out + err)[-200:])
+def check_mihomo_config():
+    rc, out, err = _run(["mihomo", "-t", "-d", "/etc/mihomo"], t=20)
+    return ("ok", "mihomo 配置", "test 通过") if rc == 0 \
+        else ("fail", "mihomo 配置", "test 失败: " + (out + err)[-200:])
 
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():
@@ -293,8 +289,8 @@ def check_deep_upstreams():
         level = max(level, "warn", key=rank.get)
     return (level, "DNS 上游探测", " ; ".join(parts))
 
-ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_cert, check_dns, check_singbox_config]
+ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
+       check_internal_cidr, check_nft, check_cert, check_dns, check_mihomo_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加

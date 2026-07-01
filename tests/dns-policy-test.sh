@@ -51,7 +51,7 @@ else
   note "下载 mosdns $MOSDNS_VER ($ARCH)…"
   curl -fsSL "https://github.com/IrineSistiana/mosdns/releases/download/${MOSDNS_VER}/mosdns-linux-${ARCH}.zip" \
        -o "$WORK/m.zip" || fail "mosdns 下载失败"
-  pdg_verify_sha256 "$WORK/m.zip" "${PDG_SHA256[mosdns-$ARCH]:-}" "mosdns $MOSDNS_VER ($ARCH)" \
+  pdg_verify_sha256 "$WORK/m.zip" "$(pdg_sha256 "mosdns-$ARCH")" "mosdns $MOSDNS_VER ($ARCH)" \
     || fail "mosdns SHA256 校验失败"
   (cd "$WORK" && unzip -q m.zip) || fail "解压 mosdns 失败"
   MD="$WORK/mosdns"; chmod +x "$MD"

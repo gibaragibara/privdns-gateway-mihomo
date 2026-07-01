@@ -4,7 +4,7 @@
 配合 nftables 只放行「内网卡来源段」→ :81: 普通卡探不通(被 drop)、内网卡探得通 →
 iOS OnDemand 据此只在内网卡(蜂窝)激活 DoT, 实现双卡区分。
 """
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -22,4 +22,4 @@ class H(BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", 81), H).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 81), H).serve_forever()

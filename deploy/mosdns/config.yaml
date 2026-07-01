@@ -17,7 +17,7 @@ plugins:
     # 想换/加用 bot『🌐 DNS 上游』(会保留 concurrent: 2)。
     args: { concurrent: 2, upstreams: [ {addr: "https://223.5.5.5/dns-query"}, {addr: "udp://223.5.5.5:53"}, {addr: "udp://119.29.29.29:53"} ] }
   # WDA/流媒体解锁支(常驻, 平时休眠): bot『🌐 DNS 上游→🔓 解锁走 WDA』开启时, 会把要解锁的域名
-  # 写进 unlock.txt; 仅"本机查询"(=sing-box 直出解析这些域名时)走解锁 DNS 22.22.22.22 拿中继 IP。
+  # 写进 unlock.txt; 仅"本机查询"(=mihomo 直出解析这些域名时)走解锁 DNS 22.22.22.22 拿中继 IP。
   # 落地模式下 unlock.txt 由 bot 留空/这些域名走各自出口, 本支不命中=休眠。unlock.txt 由 install 建空文件。
   - tag: unlock_upstream
     type: forward

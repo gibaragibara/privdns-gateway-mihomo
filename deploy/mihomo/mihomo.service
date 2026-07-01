@@ -1,0 +1,15 @@
+[Unit]
+Description=mihomo TPROXY gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/usr/local/bin/pdg-mihomo-tproxy.sh up
+ExecStart=/usr/local/bin/mihomo -d /etc/mihomo
+ExecStopPost=/usr/local/bin/pdg-mihomo-tproxy.sh down
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

@@ -91,9 +91,9 @@ def main():
     parts.append(section("自检 doctor --json", run(["python3", "/opt/pdg-bot/doctor.py", "--json"])))
     parts.append(section("服务状态", "\n".join(
         f"  {s:<14}{run(['systemctl', 'is-active', s])}"
-        for s in ("mosdns", "sing-box", "pdg-bot", "pdg-probe81",
+        for s in ("mosdns", "mihomo", "pdg-bot", "pdg-probe81",
                   "pdg-rules-update.timer", "pdg-health.timer", "vnstat"))))
-    parts.append(section("sing-box 版本", run(["sing-box", "version"])))
+    parts.append(section("mihomo 版本", run(["mihomo", "-v"])))
     parts.append(section("监听端口 (ss -lntu)", run(["ss", "-lntu"])))
     parts.append(section("证书 (CN / 有效期)",
                          run(["openssl", "x509", "-in", cert, "-noout", "-subject", "-enddate"])))
@@ -103,8 +103,8 @@ def main():
     if fw_rc != 0:
         fw = run(["nft", "list", "chain", "inet", "filter", "input"])
     parts.append(section("防火墙 input 链", fw))
-    parts.append(section("最近日志 (pdg-bot / mosdns / sing-box, 80 行)",
-                         run(["journalctl", "-u", "pdg-bot", "-u", "mosdns", "-u", "sing-box",
+    parts.append(section("最近日志 (pdg-bot / mosdns / mihomo, 80 行)",
+                         run(["journalctl", "-u", "pdg-bot", "-u", "mosdns", "-u", "mihomo",
                               "-n", "80", "--no-pager", "-o", "short-iso"], t=20)))
 
     text = "".join(parts)

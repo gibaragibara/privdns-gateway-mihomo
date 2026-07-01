@@ -11,7 +11,7 @@ assert '"callback_data": "nav:ops"' in bot, "ops result keyboard should return t
 assert 'set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK)' in bot, (
     "TFO toggle result must not show the whole first-level menu"
 )
-assert 'edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, OPS_BACK)' in bot, (
+assert 'edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK)' in bot, (
     "restart result must stay in ops navigation"
 )
 assert 'edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0' in bot, (

@@ -6,7 +6,7 @@
 诊断  : 状态 / 端到端测出口延迟(clash_api) / 流量统计(clash_api)
 运维  : 重启 / 更新规则库(geosite + 规则集) / iOS 描述文件下发 / 配置备份·恢复
 
-UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, check 失败自动回滚。
+UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 失败自动回滚。
 环境变量: PDG_BOT_TOKEN, PDG_BOT_ALLOWED(逗号分隔的 user id)
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
@@ -17,8 +17,9 @@ from collections import Counter
 
 TOKEN = os.environ.get("PDG_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("PDG_BOT_ALLOWED", "").replace(" ", "").split(",") if x}
-SB = "/etc/sing-box/config.json"
-RS_DIR = "/etc/sing-box/rs"
+STATE = "/etc/mihomo/state.json"       # bot 内部状态(沿用 sing-box 风格字段, 方便复用菜单逻辑)
+MIHOMO_CFG = "/etc/mihomo/config.yaml" # 实际给 mihomo 读取的原生 YAML
+RS_DIR = "/etc/mihomo/rs"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 MOSDNS_DIRECT = "/etc/mosdns/rules/custom_direct.txt"
 RS_META = "/opt/pdg-bot/rulesets.json"
@@ -135,7 +136,7 @@ def send(chat, text, kb=None):
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML",
          "reply_markup": kb or MENU, "disable_web_page_preview": True}
     if not post("sendMessage", p).get("ok"):
-        p.pop("parse_mode", None)   # HTML 解析失败(文本含 < & 等, 如 sing-box 报错)→ 退回纯文本, 保证消息+键盘送达
+        p.pop("parse_mode", None)   # HTML 解析失败(文本含 < & 等, 如 mihomo 报错)→ 退回纯文本, 保证消息+键盘送达
         post("sendMessage", p)
 
 def send_plain(chat, text):
@@ -173,7 +174,7 @@ def answer_cb_async(cb_id):
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
-# ── clash_api (sing-box experimental) ──
+# ── clash_api (mihomo external-controller) ──
 def clash_get(path):
     with urllib.request.urlopen(CLASH + path, timeout=12) as r:
         return json.load(r)
@@ -184,16 +185,251 @@ def clash_up():
     except Exception:  # noqa: BLE001
         return False
 
-# ── sing-box ──
+# ── mihomo 配置生成 ──
 def load():
-    return json.load(open(SB))
+    return json.load(open(STATE))
+
+def _yaml_scalar(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if v is None:
+        return "null"
+    return json.dumps(str(v), ensure_ascii=False)
+
+def _yaml_dump(v, indent=0):
+    sp = " " * indent
+    if isinstance(v, dict):
+        lines = []
+        for k, val in v.items():
+            key = str(k)
+            if isinstance(val, (dict, list)):
+                lines.append(f"{sp}{key}:")
+                lines.append(_yaml_dump(val, indent + 2))
+            else:
+                lines.append(f"{sp}{key}: {_yaml_scalar(val)}")
+        return "\n".join(lines)
+    if isinstance(v, list):
+        if not v:
+            return sp + "[]"
+        lines = []
+        for item in v:
+            if isinstance(item, dict):
+                lines.append(f"{sp}-")
+                lines.append(_yaml_dump(item, indent + 2))
+            elif isinstance(item, list):
+                lines.append(f"{sp}-")
+                lines.append(_yaml_dump(item, indent + 2))
+            else:
+                lines.append(f"{sp}- {_yaml_scalar(item)}")
+        return "\n".join(lines)
+    return sp + _yaml_scalar(v)
+
+def _duration_seconds(v, default=180):
+    if isinstance(v, int):
+        return v
+    s = str(v or "").strip().lower()
+    m = re.match(r"^(\d+)(ms|s|m|h)?$", s)
+    if not m:
+        return default
+    n = int(m.group(1)); u = m.group(2) or "s"
+    return max(1, n // 1000) if u == "ms" else n * (60 if u == "m" else 3600 if u == "h" else 1)
+
+def _mihomo_tls(proxy, tls):
+    if not tls or not tls.get("enabled"):
+        return
+    proxy["tls"] = True
+    if tls.get("server_name"):
+        proxy["servername"] = tls["server_name"]
+    if tls.get("insecure"):
+        proxy["skip-cert-verify"] = True
+    if tls.get("utls", {}).get("fingerprint"):
+        proxy["client-fingerprint"] = tls["utls"]["fingerprint"]
+    reality = tls.get("reality") or {}
+    if reality.get("enabled"):
+        ro = {}
+        if reality.get("public_key"):
+            ro["public-key"] = reality["public_key"]
+        if reality.get("short_id"):
+            ro["short-id"] = reality["short_id"]
+        proxy["reality-opts"] = ro
+
+def _mihomo_transport(proxy, transport):
+    if not transport:
+        return
+    typ = transport.get("type")
+    if typ == "ws":
+        proxy["network"] = "ws"
+        opts = {}
+        if transport.get("path"):
+            opts["path"] = transport["path"]
+        if transport.get("headers"):
+            opts["headers"] = transport["headers"]
+        if opts:
+            proxy["ws-opts"] = opts
+    elif typ == "grpc":
+        proxy["network"] = "grpc"
+        if transport.get("service_name"):
+            proxy["grpc-opts"] = {"grpc-service-name": transport["service_name"]}
+
+def _mihomo_proxy(o):
+    typ = o.get("type")
+    name = o.get("tag") or o.get("name")
+    if typ == "direct":
+        return {"name": name, "type": "direct"}
+    base = {"name": name, "server": o.get("server"), "port": int(o.get("server_port", 0) or 0)}
+    if typ == "shadowsocks":
+        p = {**base, "type": "ss", "cipher": o.get("method"), "password": o.get("password", ""), "udp": True}
+    elif typ == "vmess":
+        p = {**base, "type": "vmess", "uuid": o.get("uuid"), "alterId": int(o.get("alter_id", 0) or 0),
+             "cipher": o.get("security") or "auto"}
+        _mihomo_tls(p, o.get("tls")); _mihomo_transport(p, o.get("transport"))
+    elif typ == "trojan":
+        p = {**base, "type": "trojan", "password": o.get("password", "")}
+        _mihomo_tls(p, o.get("tls")); _mihomo_transport(p, o.get("transport"))
+    elif typ == "vless":
+        p = {**base, "type": "vless", "uuid": o.get("uuid")}
+        if o.get("flow"):
+            p["flow"] = o["flow"]
+        _mihomo_tls(p, o.get("tls")); _mihomo_transport(p, o.get("transport"))
+    elif typ == "hysteria2":
+        p = {**base, "type": "hysteria2", "password": o.get("password", "")}
+        _mihomo_tls(p, o.get("tls"))
+        if o.get("obfs"):
+            p["obfs"] = o["obfs"].get("type")
+            p["obfs-password"] = o["obfs"].get("password", "")
+    elif typ == "tuic":
+        p = {**base, "type": "tuic", "uuid": o.get("uuid"), "password": o.get("password", "")}
+        _mihomo_tls(p, o.get("tls"))
+        if o.get("congestion_control"):
+            p["congestion-controller"] = o["congestion_control"]
+        if o.get("udp_relay_mode"):
+            p["udp-relay-mode"] = o["udp_relay_mode"]
+    elif typ == "anytls":
+        p = {**base, "type": "anytls", "password": o.get("password", "")}
+        _mihomo_tls(p, o.get("tls"))
+    elif typ == "socks":
+        p = {**base, "type": "socks5", "udp": True}
+        if o.get("username"):
+            p["username"] = o["username"]
+        if o.get("password"):
+            p["password"] = o["password"]
+    elif typ == "http":
+        p = {**base, "type": "http"}
+        if o.get("username"):
+            p["username"] = o["username"]
+        if o.get("password"):
+            p["password"] = o["password"]
+        _mihomo_tls(p, o.get("tls"))
+    else:
+        raise ValueError("不支持的出口类型: " + str(typ))
+    if o.get("tcp_fast_open"):
+        p["tfo"] = True
+    return p
+
+def _rule_provider_path(name, meta):
+    info = meta.get(name, {})
+    p = info.get("path") or ""
+    if p.startswith(RS_DIR + "/"):
+        return p
+    yaml_path = os.path.join(RS_DIR, name + ".yaml")
+    legacy_json = os.path.join(RS_DIR, name + ".json")
+    if not os.path.exists(yaml_path) and os.path.exists(legacy_json):
+        try:
+            rules = json.load(open(legacy_json)).get("rules", [])
+            with open(yaml_path, "w") as f:
+                f.write("payload:\n")
+                for rule in rules:
+                    for x in rule.get("domain", []):
+                        f.write("  - DOMAIN," + x + "\n")
+                    for x in rule.get("domain_suffix", []):
+                        f.write("  - DOMAIN-SUFFIX," + x + "\n")
+                    for x in rule.get("domain_keyword", []):
+                        f.write("  - DOMAIN-KEYWORD," + x + "\n")
+                    for x in rule.get("ip_cidr", []):
+                        f.write("  - IP-CIDR," + x + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+    return os.path.join(RS_DIR, name + ".yaml")
+
+def _mihomo_config(c):
+    meta = _rs_meta()
+    proxies, groups = [], []
+    for o in c.get("outbounds", []):
+        if o.get("type") == "urltest":
+            groups.append({"name": o["tag"], "type": "url-test", "proxies": o.get("outbounds", []),
+                           "url": o.get("url", DELAY_URL), "interval": _duration_seconds(o.get("interval"), 180),
+                           "tolerance": int(o.get("tolerance", 50) or 50)})
+        else:
+            proxies.append(_mihomo_proxy(o))
+    providers = {}
+    for rs in c.get("route", {}).get("rule_set", []):
+        name = rs.get("tag")
+        if not name:
+            continue
+        providers[name] = {"type": "file", "behavior": "classical", "path": _rule_provider_path(name, meta)}
+    rules = []
+    for r in c.get("route", {}).get("rules", []):
+        target = r.get("outbound")
+        if r.get("action") == "reject":
+            for cidr in r.get("ip_cidr", []):
+                rules.append(f"IP-CIDR,{cidr},REJECT-DROP,no-resolve")
+            continue
+        if not target:
+            continue
+        if r.get("inbound") == [TG_INBOUND]:
+            rules.append(f"IN-NAME,{TG_INBOUND},{target}")
+            continue
+        if r.get("rule_set"):
+            rules.append(f"RULE-SET,{r['rule_set']},{target}")
+            continue
+        for d in r.get("domain", []):
+            rules.append(f"DOMAIN,{d},{target}")
+        for d in r.get("domain_suffix", []):
+            rules.append(f"DOMAIN-SUFFIX,{d},{target}")
+        for k in r.get("domain_keyword", []):
+            rules.append(f"DOMAIN-KEYWORD,{k},{target}")
+        for cidr in r.get("ip_cidr", []):
+            rules.append(f"IP-CIDR,{cidr},{target},no-resolve")
+    rules.append("MATCH," + c.get("route", {}).get("final", "jp"))
+    cfg = {
+        "tproxy-port": 7893,
+        "allow-lan": True,
+        "bind-address": "*",
+        "mode": "rule",
+        "log-level": "warning",
+        "external-controller": "127.0.0.1:9090",
+        "ipv6": False,
+        "listeners": [{"name": TG_INBOUND, "type": "mixed", "port": 8445, "listen": "0.0.0.0"}],
+        "sniffer": {
+            "enable": True, "force-dns-mapping": True, "parse-pure-ip": True, "override-destination": True,
+            "sniff": {"HTTP": {"ports": ["1-65535"]}, "TLS": {"ports": ["1-65535"]}, "QUIC": {"ports": ["1-65535"]}},
+        },
+        "dns": {"enable": True, "ipv6": False, "nameserver": ["22.22.22.22"]},
+        "proxies": proxies,
+        "rules": rules,
+    }
+    if groups:
+        cfg["proxy-groups"] = groups
+    if providers:
+        cfg["rule-providers"] = providers
+    return cfg
 
 def _write(c):
-    t = SB + ".tmp"
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    os.makedirs(RS_DIR, exist_ok=True)
+    t = STATE + ".tmp"
     with open(t, "w") as f:
         json.dump(c, f, ensure_ascii=False, indent=2)
-    os.chmod(t, 0o600)        # config.json 含出口密码/uuid, 收紧到 600
-    os.replace(t, SB)
+    os.chmod(t, 0o600)
+    os.replace(t, STATE)
+    y = MIHOMO_CFG + ".tmp"
+    with open(y, "w") as f:
+        f.write("# Generated by pdg-bot. Edit /etc/mihomo/state.json via bot/pdg, not this file.\n")
+        f.write(_yaml_dump(_mihomo_config(c)) + "\n")
+    os.chmod(y, 0o600)
+    os.replace(y, MIHOMO_CFG)
 
 def _svc_active(unit, need=3, delay=0.6, max_polls=15):
     """确认服务"稳定" active: 要求连续 need 次观测都是 active。
@@ -211,21 +447,27 @@ def _svc_active(unit, need=3, delay=0.6, max_polls=15):
     return False
 
 def apply_sb(modify):
-    shutil.copy(SB, SB + ".botbak"); os.chmod(SB + ".botbak", 0o600)
+    shutil.copy(STATE, STATE + ".botbak"); os.chmod(STATE + ".botbak", 0o600)
+    if os.path.exists(MIHOMO_CFG):
+        shutil.copy(MIHOMO_CFG, MIHOMO_CFG + ".botbak"); os.chmod(MIHOMO_CFG + ".botbak", 0o600)
     c = load(); modify(c); _write(c)
-    chk = sh(["sing-box", "check", "-c", SB])
+    chk = sh(["mihomo", "-t", "-d", os.path.dirname(MIHOMO_CFG)])
     if chk.returncode != 0:
-        shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
+        shutil.copy(STATE + ".botbak", STATE)
+        if os.path.exists(MIHOMO_CFG + ".botbak"):
+            shutil.copy(MIHOMO_CFG + ".botbak", MIHOMO_CFG)
         return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
-    sh(["systemctl", "reset-failed", "sing-box"])   # 清掉 start-limit 计数: 连改多条(如连删域名)快速多次重启不会触发限速锁死
-    r = sh(["systemctl", "restart", "sing-box"])
-    if r.returncode != 0 or not _svc_active("sing-box"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
-        shutil.copy(SB + ".botbak", SB)
-        sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-        return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
+    sh(["systemctl", "reset-failed", "mihomo"])   # 清掉 start-limit 计数: 连改多条快速多次重启不会触发限速锁死
+    r = sh(["systemctl", "restart", "mihomo"])
+    if r.returncode != 0 or not _svc_active("mihomo"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
+        shutil.copy(STATE + ".botbak", STATE)
+        if os.path.exists(MIHOMO_CFG + ".botbak"):
+            shutil.copy(MIHOMO_CFG + ".botbak", MIHOMO_CFG)
+        sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
+        return False, "重启 mihomo 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
     return True, ""
 
-# 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。sing-box 支持的都列上。
+# 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
                "tuic", "anytls", "shadowtls", "socks", "http")
 
@@ -312,7 +554,7 @@ def _parse_surge(line):
         raise ValueError("Surge ss 行缺 encrypt-method 或 password")
     out = {"type": "shadowsocks", "tag": _tag(name.strip(), server, str(port)),
            "server": server, "server_port": port, "method": method, "password": pw}
-    if kv.get("tfo", "").lower() in ("true", "1"):    # udp-relay: sing-box ss 出站默认就支持 UDP, 无需额外字段
+    if kv.get("tfo", "").lower() in ("true", "1"):
         out["tcp_fast_open"] = True
     return out
 
@@ -539,7 +781,7 @@ def set_mosdns_upstream(which, addrs):
 # WDA 模式: 这些域名 → jp 直出 + 经 mosdns 用解锁 DNS(22.22.22.22)解析到中继(从本机授权 IP 出)。
 # 落地模式: 不加规则, 这些域名回落到各自现有分流出口(hk/tw 等)。
 # mosdns 侧的 unlock 支(unlock_upstream + geosite_unlock)是常驻的(install/迁移装好), 平时休眠;
-# 本函数只在 WDA 模式把域名清单写进 mosdns 的 unlock.txt 与 sing-box 的 rule_set, 并加 sing-box 路由规则。
+# 本函数只在 WDA 模式把域名清单写进 mosdns 的 unlock.txt 与 mihomo 的 rule-provider, 并加 mihomo 路由规则。
 MOSDNS_RULES = "/etc/mosdns/rules"
 UNLOCK_DNS = "22.22.22.22"   # 解锁服务(WDA)的 DNS; 与 mosdns unlock_upstream 一致。换厂商需同步两处。
 WDA_DOMAINS = [
@@ -566,7 +808,7 @@ def _wda_on(c=None):
                for r in c.get("route", {}).get("rules", []))
 
 def _server_ip():
-    """本机公网 IP(从 sing-box 的 reject 规则取); 用于提示去解锁服务后台授权哪个 IP。"""
+    """本机公网 IP(从 mihomo state 的 reject 规则取); 用于提示去解锁服务后台授权哪个 IP。"""
     try:
         for r in load().get("route", {}).get("rules", []):
             if r.get("action") == "reject":
@@ -626,8 +868,10 @@ def set_wda_mode(on):
         if not ok:
             return False, err
         os.makedirs(RS_DIR, exist_ok=True)
-        json.dump({"version": 1, "rules": [{"domain_suffix": WDA_DOMAINS}]},
-                  open(os.path.join(RS_DIR, "unlock.json"), "w"), ensure_ascii=False)
+        with open(os.path.join(RS_DIR, "unlock.yaml"), "w") as f:
+            f.write("payload:\n")
+            for d in WDA_DOMAINS:
+                f.write("  - DOMAIN-SUFFIX," + d + "\n")
     def mod(c):
         c["route"].setdefault("rule_set", [])
         c["route"]["rule_set"] = [r for r in c["route"]["rule_set"] if r.get("tag") != "unlock"]
@@ -647,11 +891,11 @@ def set_wda_mode(on):
     if on:
         return True, ("✅ 已切到【🔓 WDA 解锁】: %d 个域名走 WDA(jp 直出 + 22.22.22.22 中继)。\n"
                       "其余流量照常分流。哪个服务在 WDA 下不灵, 切回【落地出口】即可。") % len(WDA_DOMAINS)
-    # 关闭: sing-box 规则已撤; 再清空 mosdns unlock.txt, 让解锁支彻底休眠(否则本机解析这些域名仍走解锁 DNS)
+    # 关闭: mihomo 规则已撤; 再清空 mosdns unlock.txt, 让解锁支彻底休眠(否则本机解析这些域名仍走解锁 DNS)
     okc, errc = _write_unlock_file([])
     if okc:
         return True, "✅ 已切到【🛬 落地出口】: 解锁域名回落各自出口(hk/tw), mosdns 解锁清单已清空。"
-    return True, ("✅ 已切到【🛬 落地出口】(sing-box 规则已撤)。\n"
+    return True, ("✅ 已切到【🛬 落地出口】(mihomo 规则已撤)。\n"
                   "⚠️ 但清空 mosdns unlock.txt 失败(" + errc + "): 本机解析这些域名可能仍走解锁 DNS, 可再点一次 🛬 或手动清空。")
 
 # ── TCP Fast Open ──
@@ -683,7 +927,7 @@ def set_tfo(on):
     return ok, ((f"✅ TFO 已{'开启' if on else '关闭'}(出口+入口)\n"
                  "降到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。") if ok else msg)
 
-# ── 规则集 (Surge .list -> sing-box local rule_set) ──
+# ── 规则集 (Surge .list -> mihomo classical rule-provider) ──
 def _rs_meta():
     if os.path.exists(RS_META):
         return json.load(open(RS_META))
@@ -720,20 +964,19 @@ def _fetch_bytes(url):
         return r.read()
 
 def _build_source(url, path):
-    """下载 Surge/Clash 文本 → 写 sing-box source rule_set。返回 (条数, 是否纯IP)。"""
+    """下载 Surge/Clash 文本 → 写 mihomo classical rule-provider。返回 (条数, 是否纯IP)。"""
     dom, suf, kw, ip = _fetch_surge(url)
     if not (dom or suf or kw or ip):
         raise ValueError("没解析出规则(支持 DOMAIN/-SUFFIX/-KEYWORD/IP-CIDR)")
-    rule = {}
-    if dom:
-        rule["domain"] = dom
-    if suf:
-        rule["domain_suffix"] = suf
-    if kw:
-        rule["domain_keyword"] = kw
-    if ip:
-        rule["ip_cidr"] = ip
-    json.dump({"version": 1, "rules": [rule]}, open(path, "w"), ensure_ascii=False)
+    payload = []
+    payload += [f"DOMAIN,{x}" for x in dom]
+    payload += [f"DOMAIN-SUFFIX,{x}" for x in suf]
+    payload += [f"DOMAIN-KEYWORD,{x}" for x in kw]
+    payload += [f"IP-CIDR,{x}" for x in ip]
+    with open(path, "w") as f:
+        f.write("payload:\n")
+        for item in payload:
+            f.write("  - " + item + "\n")
     return len(dom) + len(suf) + len(kw) + len(ip), (len(dom) + len(suf) + len(kw) == 0)
 
 def add_ruleset(url, target, label=""):
@@ -741,19 +984,15 @@ def add_ruleset(url, target, label=""):
     if target not in exit_tags(c):
         return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))}"
     low = url.lower().split("?", 1)[0]
-    if low.endswith(".mrs"):
-        return False, ".mrs 是 mihomo 二进制格式, sing-box 不支持。请用 .list/.txt 文本规则, 或 sing-box .srs。"
+    if low.endswith((".mrs", ".srs")):
+        return False, "bot 目前只解析 .list/.txt 文本规则集；.mrs/.srs 可手写到 /etc/mihomo/config.yaml，但不会被 bot 管理。"
     name = "rs_" + hashlib.sha1(url.encode()).hexdigest()[:8]
     os.makedirs(RS_DIR, exist_ok=True)
     try:
-        if low.endswith(".srs"):
-            path = os.path.join(RS_DIR, name + ".srs"); fmt = "binary"
-            open(path, "wb").write(_fetch_bytes(url)); count = None; warn = ""
-        else:
-            path = os.path.join(RS_DIR, name + ".json"); fmt = "source"
-            count, ip_only = _build_source(url, path)
-            warn = ("\n⚠️ 纯 IP 规则集: 本网关按域名(SNI)分流, IP 规则基本不会命中 "
-                    "(Telegram App 等也走不了)。" if ip_only else "")
+        path = os.path.join(RS_DIR, name + ".yaml"); fmt = "classical"
+        count, ip_only = _build_source(url, path)
+        warn = ("\n⚠️ 纯 IP 规则集: 透明代理能看到 IP 连接, 但无域名的 App 仍可能无法被精确分流。"
+                if ip_only else "")
     except Exception as e:  # noqa: BLE001
         return False, f"下载/解析失败: {e}"
 
@@ -771,12 +1010,12 @@ def add_ruleset(url, target, label=""):
         if label.strip():
             m[name]["label"] = label.strip()[:40]
         _save_rs_meta(m)
-        cntdesc = f"{count} 条" if count is not None else "sing-box .srs"
+        cntdesc = f"{count} 条"
         return True, f"规则集已添加 → {target}（{cntdesc}，{label.strip() or name}）" + warn
     return False, msg
 
 def set_ruleset_label(name, label):
-    """给规则集设个看得懂的显示名(备注), 只改 bot 显示, 不动 sing-box 内部 tag/文件。"""
+    """给规则集设个看得懂的显示名(备注), 只改 bot 显示, 不动 mihomo 内部 tag/文件。"""
     m = _rs_meta()
     if name not in m:
         return False, "规则集不存在(可能已删), 重开列表再试"
@@ -801,7 +1040,7 @@ def del_ruleset(name):
     ok, msg = apply_sb(mod)
     if ok:
         m.pop(name, None); _save_rs_meta(m)
-        for p in (path, os.path.join(RS_DIR, name + ".json"), os.path.join(RS_DIR, name + ".srs")):
+        for p in (path, os.path.join(RS_DIR, name + ".yaml")):
             try:
                 if p:
                     os.remove(p)
@@ -811,21 +1050,17 @@ def del_ruleset(name):
     return False, msg
 
 def refresh_rulesets():
-    """重下并原子替换所有规则集; sing-box check 通过才重启, 坏档自动回滚、不断网(供 bot 与每日定时调用)。"""
+    """重下并原子替换所有规则集; mihomo test 通过才重启, 坏档自动回滚、不断网(供 bot 与每日定时调用)。"""
     m = _rs_meta(); n = 0; swapped = []   # (path, bak)
     for name, info in m.items():
         # 兼容早期缺 format/path 的旧条目 (按 name 回填, 否则刷新会 KeyError)。
-        info.setdefault("format", "binary" if str(info.get("path", "")).endswith(".srs") else "source")
-        info.setdefault("path", os.path.join(RS_DIR, name + (".srs" if info["format"] == "binary" else ".json")))
+        info.setdefault("format", "classical")
+        info.setdefault("path", os.path.join(RS_DIR, name + ".yaml"))
+        if not str(info["path"]).startswith(RS_DIR + "/"):
+            info["path"] = os.path.join(RS_DIR, name + ".yaml")
         tmp = info["path"] + ".new"
         try:
-            if info["format"] == "binary":
-                data = _fetch_bytes(info["url"])
-                if not data:
-                    raise ValueError("空响应")
-                open(tmp, "wb").write(data)
-            else:
-                info["count"] = _build_source(info["url"], tmp)[0]   # 先写临时文件
+            info["count"] = _build_source(info["url"], tmp)[0]   # 先写临时文件
             n += 1
         except Exception as e:  # noqa: BLE001
             print("refresh rs", name, e)
@@ -844,24 +1079,24 @@ def refresh_rulesets():
         os.replace(tmp, info["path"])
     if n == 0:
         return 0
-    if sh(["sing-box", "check", "-c", SB]).returncode != 0:   # 坏档 → 回滚, 不重启(不断网)
+    if sh(["mihomo", "-t", "-d", os.path.dirname(MIHOMO_CFG)]).returncode != 0:   # 坏档 → 回滚, 不重启(不断网)
         for path, bak in swapped:
             shutil.copy(bak, path)
-        print("refresh rs: sing-box check 失败, 已回滚, 不重启")
+        print("refresh rs: mihomo test 失败, 已回滚, 不重启")
         return 0
-    # 先重启加载新规则集, 确认 sing-box 真的 active 再删 .bak; 起不来则还原旧规则集重启, 不断网。
-    sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-    if not _svc_active("sing-box"):
+    # 先重启加载新规则集, 确认 mihomo 真的 active 再删 .bak; 起不来则还原旧规则集重启, 不断网。
+    sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
+    if not _svc_active("mihomo"):
         for path, bak in swapped:
             shutil.copy(bak, path)        # 还原旧规则集
-        sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-        if _svc_active("sing-box"):       # 确认旧服务真的恢复, 再清备份
+        sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
+        if _svc_active("mihomo"):       # 确认旧服务真的恢复, 再清备份
             for _, bak in swapped:
                 try:
                     os.remove(bak)
                 except OSError:
                     pass
-            print("refresh rs: 新规则集致 sing-box 起不来, 已还原旧规则集并恢复")
+            print("refresh rs: 新规则集致 mihomo 起不来, 已还原旧规则集并恢复")
         else:                             # 连旧档都起不来 → 保留 .bak 备查, 不再删
             print("refresh rs: 还原旧规则集后仍未 active, 保留 .bak 备查")
         return 0
@@ -930,7 +1165,7 @@ def _vnstat():
 
 def traffic_text():
     parts = []
-    # 实时: clash_api —— 当前连接 + 「本会话」(sing-box 启动以来)经代理流量, sing-box 重启即清零
+    # 实时: clash_api —— 当前连接 + 「本会话」(mihomo 启动以来)经代理流量, mihomo 重启即清零
     if clash_up():
         try:
             d = clash_get("/connections")
@@ -941,7 +1176,7 @@ def traffic_text():
                 cnt[tag] += 1; up[tag] += cn.get("upload", 0); dn[tag] += cn.get("download", 0)
             lines = [f"• <b>{t}</b>: {cnt[t]}条 ↑{_fmt_bytes(up[t])} ↓{_fmt_bytes(dn[t])}"
                      for t, _ in cnt.most_common()]
-            parts.append("📈 <b>实时(sing-box 本会话, 重启清零)</b>\n"
+            parts.append("📈 <b>实时(mihomo 本会话, 重启清零)</b>\n"
                          f"会话累计 ↑{_fmt_bytes(d.get('uploadTotal'))} ↓{_fmt_bytes(d.get('downloadTotal'))}\n"
                          f"活跃连接 {len(conns)}" + ("\n" + "\n".join(lines) if lines else ""))
         except Exception as e:  # noqa: BLE001
@@ -1079,7 +1314,7 @@ def deletable_domains():
     return items
 
 def del_rules_bulk(domains):
-    """一次删除多个域名(出口规则 + 直连表), 只重启一次 sing-box。"""
+    """一次删除多个域名(出口规则 + 直连表), 只重启一次 mihomo。"""
     domains = {d.strip().lower() for d in domains if d.strip()}
     if not domains:
         return False, "没勾选任何域名"
@@ -1213,23 +1448,30 @@ def _internal_probe_ip():
     return ""
 
 def _match_ruleset(name, d, sufs):
-    p = os.path.join(RS_DIR, name + ".json")
+    p = os.path.join(RS_DIR, name + ".yaml")
     if not os.path.exists(p):
-        return False  # .srs 二进制无法解析
+        return False
     try:
-        rules = json.load(open(p)).get("rules", [])
+        lines = open(p).read().splitlines()
     except Exception:  # noqa: BLE001
         return False
-    for rule in rules:
-        if d in rule.get("domain", []):
+    for line in lines:
+        s = line.strip()
+        if not s.startswith("- "):
+            continue
+        parts = [x.strip() for x in s[2:].split(",", 1)]
+        if len(parts) != 2:
+            continue
+        typ, val = parts[0].upper(), parts[1]
+        if typ == "DOMAIN" and d == val:
             return True
-        if any(d == s or d.endswith("." + s) for s in rule.get("domain_suffix", [])):
+        if typ == "DOMAIN-SUFFIX" and (d == val or d.endswith("." + val)):
             return True
-        if any(k in d for k in rule.get("domain_keyword", [])):
+        if typ == "DOMAIN-KEYWORD" and val in d:
             return True
     return False
 
-def _singbox_route(d):
+def _mihomo_route(d):
     sufs = [".".join(d.split(".")[i:]) for i in range(len(d.split(".")))]
     c = load()
     for r in c["route"]["rules"]:
@@ -1260,10 +1502,10 @@ def test_domain(domain):
     head = f"🔎 <b>{d}</b>\n"
     if real and sip not in real:
         return head + f"→ 🏠 <b>国内直连</b>(mosdns 返回真实 IP {real[0]})"
-    tag, why = _singbox_route(d)
+    tag, why = _mihomo_route(d)
     res = head + f"→ 📤 出口 <b>{tag}</b>(命中: {why})"
     if not real:
-        res += "\n<i>(没探到 DNS 结果, 直连/代理未实测; 以上为 sing-box 规则模拟)</i>"
+        res += "\n<i>(没探到 DNS 结果, 直连/代理未实测; 以上为 mihomo 规则模拟)</i>"
     return res
 
 # ── 自定义 DoT 域名 (certbot standalone 签证书 → 换 mosdns DoT 证书) ──
@@ -1320,9 +1562,10 @@ def _ios_profile():
              .replace("__UUID2__", str(uuid.uuid4()).upper())).encode()
 
 # ── 配置备份 / 恢复 ──
-BACKUP_FILES = [SB, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
+BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
 RESTORE_MAP = {
-    "etc/sing-box/config.json": SB,
+    "etc/mihomo/state.json": STATE,
+    "etc/mihomo/config.yaml": MIHOMO_CFG,
     "etc/mosdns/config.yaml": MOSDNS_CONF,
     "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
     "opt/pdg-bot/rulesets.json": RS_META,
@@ -1338,11 +1581,11 @@ def backup_blob():
             tar.add(RS_DIR, arcname=RS_DIR.lstrip("/"))
     return buf.getvalue()
 
-def _machine_id(sb_path, mos_path):
-    """取一对 sing-box/mosdns 配置里的「本机身份」: (server_ip, internal_cidr, cert_dir)。"""
+def _machine_id(state_path, mos_path):
+    """取一对 mihomo/mosdns 配置里的「本机身份」: (server_ip, internal_cidr, cert_dir)。"""
     ip = cidr = certdir = None
     try:
-        c = json.load(open(sb_path))
+        c = json.load(open(state_path))
         for r in c.get("route", {}).get("rules", []):
             if r.get("action") == "reject":
                 for x in r.get("ip_cidr", []):
@@ -1361,6 +1604,7 @@ def _machine_id(sb_path, mos_path):
     return ip, cidr, certdir
 
 def restore_from(data):
+    global STATE, MIHOMO_CFG, RS_DIR
     try:
         tar = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
     except Exception:  # noqa: BLE001
@@ -1374,60 +1618,64 @@ def restore_from(data):
                 tar.extract(m, tmp)
             except Exception:  # noqa: BLE001
                 pass
-        newsb = os.path.join(tmp, "etc/sing-box/config.json")
+        newstate = os.path.join(tmp, "etc/mihomo/state.json")
+        legacy_sb = os.path.join(tmp, "etc/sing-box/config.json")
+        if not os.path.exists(newstate) and os.path.exists(legacy_sb):
+            newstate = legacy_sb
         newmos = os.path.join(tmp, "etc/mosdns/config.yaml")
-        if not os.path.exists(newsb):
-            return False, "备份里没有 sing-box 配置, 拒绝恢复"
+        if not os.path.exists(newstate):
+            return False, "备份里没有 mihomo state 配置, 拒绝恢复"
         # 机器感知: 用「本机」身份覆盖备份带来的 server_ip / 内网卡段 / 证书路径。
         # 这样跨机导入(如把 .153 的备份导到 .200)只搬出口+分流+规则集, 不会把别人的 IP/证书路径搬来搞错位。
-        cur = _machine_id(SB, MOSDNS_CONF)
-        bak = _machine_id(newsb, newmos)
+        cur = _machine_id(STATE, MOSDNS_CONF)
+        bak = _machine_id(newstate, newmos)
         kept = []
         subs = [(bak[i], cur[i]) for i in range(3) if bak[i] and cur[i] and bak[i] != cur[i]]
         if subs:
             kept = [cur[i] for i in range(3) if bak[i] and cur[i] and bak[i] != cur[i]]
-            for f in (newsb, newmos):
+            for f in (newstate, newmos):
                 if os.path.exists(f):
                     s = open(f).read()
                     for old, new in subs:
                         s = s.replace(old, new)
                     open(f, "w").write(s)
-        # 校验前把 rule_set 的绝对路径临时指向解包出来的 rs/ —— 否则 check 会去找真实位置
-        # (备份里带着这些 rs 文件, 但此刻还没恢复到 /etc/sing-box/rs/, 直接 check 会 "no such file")。
-        checksb = newsb
+        # 先用临时 /etc/mihomo 目录生成并校验 mihomo 配置。
+        cur_state, cur_cfg, cur_rs = STATE, MIHOMO_CFG, RS_DIR
+        tmp_mihomo = os.path.join(tmp, "etc/mihomo")
+        os.makedirs(tmp_mihomo, exist_ok=True)
+        shutil.copy(newstate, os.path.join(tmp_mihomo, "state.json"))
+        STATE = os.path.join(tmp_mihomo, "state.json")
+        MIHOMO_CFG = os.path.join(tmp_mihomo, "config.yaml")
+        RS_DIR = os.path.join(tmp_mihomo, "rs")
         try:
-            cfg = json.load(open(newsb))
-            changed = False
-            for rs in cfg.get("route", {}).get("rule_set", []):
-                p = rs.get("path", "")
-                cand = os.path.join(tmp, p.lstrip("/")) if p.startswith("/") else ""
-                if cand and os.path.exists(cand):
-                    rs["path"] = cand; changed = True
-            if changed:
-                checksb = newsb + ".check"
-                json.dump(cfg, open(checksb, "w"), ensure_ascii=False)
-        except Exception:  # noqa: BLE001
-            pass
-        chk = sh(["sing-box", "check", "-c", checksb])
+            _write(json.load(open(STATE)))
+            chk = sh(["mihomo", "-t", "-d", tmp_mihomo])
+        finally:
+            STATE, MIHOMO_CFG, RS_DIR = cur_state, cur_cfg, cur_rs
         if chk.returncode != 0:
-            return False, "备份的 sing-box 配置校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
+            return False, "备份的 mihomo 配置校验失败:\n" + (chk.stdout + chk.stderr)[-300:]
         ts = time.strftime("%Y%m%d-%H%M%S")
-        shutil.copy(SB, SB + ".pre-restore-" + ts)
+        shutil.copy(STATE, STATE + ".pre-restore-" + ts)
         restored = []
         for arc, dst in RESTORE_MAP.items():
             src = os.path.join(tmp, arc)
             if os.path.exists(src):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy(src, dst); restored.append(os.path.basename(dst))
-        src_rs = os.path.join(tmp, RS_DIR.lstrip("/"))
+        src_rs = os.path.join(tmp, "etc/mihomo/rs")
         if os.path.isdir(src_rs):
             shutil.rmtree(RS_DIR, ignore_errors=True); shutil.copytree(src_rs, RS_DIR); restored.append("rs/")
-        r1 = sh(["systemctl", "restart", "sing-box"])
+        os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        shutil.copy(newstate, STATE)
+        if "state.json" not in restored:
+            restored.append("state.json")
+        _write(load())
+        r1 = sh(["systemctl", "restart", "mihomo"])
         if r1.returncode != 0:
-            shutil.copy(SB + ".pre-restore-" + ts, SB); sh(["systemctl", "restart", "sing-box"])
-            return False, "恢复后 sing-box 启动失败, 已回滚 sing-box"
+            shutil.copy(STATE + ".pre-restore-" + ts, STATE); _write(load()); sh(["systemctl", "restart", "mihomo"])
+            return False, "恢复后 mihomo 启动失败, 已回滚 mihomo"
         sh(["systemctl", "restart", "mosdns"])
-        msg = "已恢复: " + ", ".join(restored) + "\n已重启 sing-box + mosdns"
+        msg = "已恢复: " + ", ".join(restored) + "\n已重启 mihomo + mosdns"
         if subs:
             msg += "\n(跨机导入: 已保留本机身份 " + "、".join(kept) + ", 只搬了出口+分流+规则集)"
         return True, msg
@@ -1464,8 +1712,8 @@ def _groups_desc(c):
     return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
 
 def status_text():
-    _st = sh(["systemctl", "is-active", "mosdns", "sing-box", "pdg-bot"]).stdout.split()
-    _states = dict(zip(["mosdns", "sing-box", "pdg-bot"], _st + ["?", "?", "?"]))
+    _st = sh(["systemctl", "is-active", "mosdns", "mihomo", "pdg-bot"]).stdout.split()
+    _states = dict(zip(["mosdns", "mihomo", "pdg-bot"], _st + ["?", "?", "?"]))
     def dot(s):
         return "🟢" if _states.get(s) == "active" else "🔴"
     c = load(); exits = exit_tags(c)
@@ -1475,7 +1723,7 @@ def status_text():
     split = "国内直连" + (f" / {nrules} 条分流规则" if nrules else "") + f" / 其余→{final}"
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
-            f"{dot('sing-box')} sing-box（流量出口）\n"
+            f"{dot('mihomo')} mihomo（TPROXY 流量出口）\n"
             f"{dot('pdg-bot')} pdg-bot（管理）\n\n"
             f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
             f"🌐 IP: <code>{_server_ip()}</code>\n"
@@ -1621,7 +1869,7 @@ def handle_cb(chat, mid, data):
         if not doms:
             _, kb = del_rule_kb(chat)
             edit(chat, mid, "还没勾选域名。勾选后再点「✅ 确认删除」:", kb); return
-        edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 sing-box…", RULE_BACK)
+        edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 mihomo…", RULE_BACK)
         ok, msg = del_rules_bulk(doms); del_sel.pop(chat, None)
         edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
     if data == "testdom":
@@ -1681,7 +1929,7 @@ def handle_cb(chat, mid, data):
         try:
             fn = "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz"
             send_document(chat, fn, backup_blob(),
-                          "💾 配置备份(含 sing-box 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
+                          "💾 配置备份(含 mihomo 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
             edit(chat, mid, "✅ 备份已发送(见上一条)。", MENU)
         except Exception as e:  # noqa: BLE001
             edit(chat, mid, f"备份失败: {e}", MENU)
@@ -1689,7 +1937,7 @@ def handle_cb(chat, mid, data):
     if data == "restore":
         state[chat] = "restore"
         edit(chat, mid, "把之前「💾 备份」得到的 <code>.tar.gz</code> 作为文件发给我即可恢复"
-             "(先 sing-box check, 失败自动回滚)。\n/cancel 取消。", BACK); return
+             "(先 mihomo 配置测试, 失败自动回滚)。\n/cancel 取消。", BACK); return
     if data == "dnsup":
         state[chat] = "set_dns"
         rem = _upstreams("remote"); loc = _upstreams("local")
@@ -1722,7 +1970,7 @@ def handle_cb(chat, mid, data):
         ok, msg = set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
     if data == "restart":
         ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
-        edit(chat, mid, "✅ 已重启 sing-box + mosdns" if ok else msg, OPS_BACK); return
+        edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK); return
     if data == "updgeo":
         edit(chat, mid, "正在更新 geosite + 规则集…", OPS_BACK)
         r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()

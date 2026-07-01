@@ -11,14 +11,14 @@
    ▼
  网关 VPS ── mosdns ──► 国内域名: 返回真实 IP (直连)
    │                   代理域名: A 记录劫持成「本机 IP」, AAAA/HTTPS 置空
-   │  :80/:443 sniff SNI
+   │  任意 tcp/udp 端口 TPROXY
    ▼
- sing-box ──► 按域名分流: AI/加密→落地A  其余国际→落地B  默认→本机直出
+ mihomo ──► sniffer + 规则分流: AI/加密→落地A  其余国际→落地B  默认→本机直出
 ```
 
 核心思想:**把 DNS 当策略引擎**。
 代理域名的 A 记录被改写成网关自己的 IP,流量于是回到网关;
-sing-box 嗅探 SNI/Host 后再决定走哪个落地。
+mihomo TPROXY 透明接入后嗅探 SNI/Host/QUIC 再决定走哪个落地。
 手机全程只有一条「私密 DNS」设置,没有任何客户端、没有 tun。
 
 ---
@@ -33,14 +33,14 @@ sing-box 嗅探 SNI/Host 后再决定走哪个落地。
   - 没有这种内网卡 → DNS 劫持会影响到所有查询源,不适用本项目。
 - 一个你能改 DNS 记录的**域名**(给 DoT 用,签 Let's Encrypt 证书)。
 - 一个 **Telegram bot**(管理出口/分流)。
-- 一个或多个**落地节点**,用来出国际流量(可选,默认其余国际从 VPS 直出)。出口跑在 sing-box 上,**协议支持 sing-box 的全部出站**;bot 能直接粘贴的链接见下。
+- 一个或多个**落地节点**,用来出国际流量(可选,默认其余国际从 VPS 直出)。出口跑在 mihomo 上;bot 能直接粘贴的链接见下。
 
 ---
 
 ## 一键安装 (Debian 12+ / Ubuntu 22+)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/gibaragibara/privdns-gateway-mihomo/main/install.sh | sudo bash
 ```
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
@@ -48,14 +48,14 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 或克隆后运行(便于先看代码):
 
 ```bash
-git clone https://github.com/misaka-cpu/privdns-gateway.git
-cd privdns-gateway
+git clone https://github.com/gibaragibara/privdns-gateway-mihomo.git
+cd privdns-gateway-mihomo
 git fetch --tags
 git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
 sudo ./install.sh
 ```
 
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
+脚本会装好 mosdns、mihomo(TPROXY)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
 域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
 详见 [docs/INSTALL.md](docs/INSTALL.md)。
 
@@ -67,7 +67,7 @@ sudo ./install.sh
 2. Telegram 给 bot 发 `/start`:
    - **📤 出口管理 → 添加**:直接粘贴节点链接。
      > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
-     > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
+     > 其它 mihomo 支持但 bot 还没解析的协议,可手写 `/etc/mihomo/state.json` 后执行 `sudo pdg restart`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
 3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
@@ -102,18 +102,16 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 | 层 | 用什么 | 说明 |
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
-| 流量 | **sing-box 1.12** | `direct` 监听 + `sniff_override_destination`(**不用 tproxy**);多出口 urltest 故障切换;clash_api 测速/流量 |
-| 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 sing-box 前 `check`+回滚 |
-| 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 sing-box 占的坑) |
-| 防火墙 | **nftables** | 对全网只留 SSH;DNS/数据/探测口只放行内网卡来源段 |
-
-> ⚠️ sing-box **必须 1.12.x** —— 1.13 移除了 `sniff_override_destination`,本网关会失效。install.sh 已固定版本。
+| 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
+| 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
+| 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 mihomo TPROXY 占的坑) |
+| 防火墙 | **nftables** | 对全网只留 SSH;DNS/探测/管理口只放行内网卡来源段;内网 tcp/udp TPROXY 到 mihomo |
 
 ## 文档
 
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/production-notes.md](docs/production-notes.md) — 实战记录与踩坑(sing-box 版本坑、QUIC 自环、ECS、安全加固等)
+- [docs/production-notes.md](docs/production-notes.md) — 上游 sing-box 版实战记录;本 fork 已切到 mihomo TPROXY
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志
 
 ## 免责声明

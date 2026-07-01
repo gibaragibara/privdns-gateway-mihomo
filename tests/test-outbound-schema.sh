@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
-# 出站 schema 校验: 用**项目锁定版** sing-box(lib/versions.sh 的 SINGBOX_VER, 钉死 SHA256)
-# 对 parse_link 生成的各协议出站跑 `sing-box check`。
-# 为什么单独做: test-parse-links.py 只验"解析出的 dict 字段对不对", 但字段名/结构跟 sing-box
-# schema 对不对得上是另一回事, 且常随版本小变 —— 必须拿锁定版真 check 才算数。CI 可跑。
-# ─────────────────────────────────────────────────────────────────────────────
+# 出站 schema 校验: 用项目锁定版 mihomo 对 parse_link + 渲染出的 config.yaml 跑 `mihomo -t`。
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -18,28 +13,28 @@ case "$(uname -m)" in
   *) fail "不支持的架构: $(uname -m)" ;;
 esac
 
-# 必须用锁定版(不是 PATH 上可能漂移的版本)→ 下载 SINGBOX_VER 并校验 SHA256
-echo "[*] 下载锁定版 sing-box $SINGBOX_VER ($ARCH)…"
-curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${ARCH}.tar.gz" \
-     -o "$WORK/sb.tgz" || fail "sing-box 下载失败"
-pdg_verify_sha256 "$WORK/sb.tgz" "${PDG_SHA256[singbox-$ARCH]:-}" "sing-box $SINGBOX_VER ($ARCH)" \
-  || fail "sing-box SHA256 校验失败"
-tar -xzf "$WORK/sb.tgz" -C "$WORK"
-SB="$(echo "$WORK"/sing-box-*/sing-box)"
-echo "[*] $("$SB" version | head -1)"
+if command -v mihomo >/dev/null && { [[ "$(uname -s)" != "Linux" ]] || mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}"; }; then
+  MIHOMO="$(command -v mihomo)"
+else
+  echo "[*] 下载锁定版 mihomo $MIHOMO_VER ($ARCH)…"
+  curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VER}/mihomo-linux-${ARCH}-v${MIHOMO_VER}.gz" \
+       -o "$WORK/mihomo.gz" || fail "mihomo 下载失败"
+  pdg_verify_sha256 "$WORK/mihomo.gz" "$(pdg_sha256 "mihomo-$ARCH")" "mihomo $MIHOMO_VER ($ARCH)" \
+    || fail "mihomo SHA256 校验失败"
+  gzip -dc "$WORK/mihomo.gz" > "$WORK/mihomo"
+  chmod +x "$WORK/mihomo"
+  MIHOMO="$WORK/mihomo"
+fi
+echo "[*] $("$MIHOMO" -v | head -1)"
 
-# 用 parse_link 拼各协议出站 → 写最小 config(占位但字段合法的值)
-python3 - "$ROOT" "$WORK/cfg.json" <<'PY'
+python3 - "$ROOT" "$WORK" <<'PY'
 import base64, json, sys, os, importlib.util
-root, out = sys.argv[1], sys.argv[2]
+root, work = sys.argv[1], sys.argv[2]
 spec = importlib.util.spec_from_file_location("b", os.path.join(root, "deploy/bot/pdg-bot.py"))
 b = importlib.util.module_from_spec(spec)
-try:
-    spec.loader.exec_module(b)
-except SystemExit:
-    pass
+spec.loader.exec_module(b)
 U = "11111111-2222-3333-4444-555555555555"
-ss2022 = base64.b64encode(b"0123456789abcdef").decode()                 # 2022-blake3-aes-128-gcm 需 16B 密钥
+ss2022 = base64.b64encode(b"0123456789abcdef").decode()
 ssui = base64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=")
 vm = base64.b64encode(json.dumps({"v": "2", "ps": "VM", "add": "vm.example.com", "port": "443",
      "id": U, "aid": "0", "net": "ws", "tls": "tls", "host": "vm.example.com", "path": "/p"}).encode()).decode()
@@ -57,17 +52,22 @@ links = [
     "socks5://u:p@1.2.3.4:1080#SOCKS",
     "http://u:p@1.2.3.4:8080#HTTP",
 ]
-obs = [b.parse_link(x) for x in links]
-print("[*] 出站类型:", [o["type"] for o in obs])
-cfg = {"log": {"level": "error"},
-       "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 12345}],
-       "outbounds": obs + [{"type": "direct", "tag": "direct"}],
-       "route": {"final": "direct"}}
-json.dump(cfg, open(out, "w"), ensure_ascii=False)
+state = {
+    "server_ip": "203.0.113.39",
+    "outbounds": [b.parse_link(x) for x in links] + [{"type": "direct", "tag": "jp"}],
+    "route": {"rules": [{"ip_cidr": ["203.0.113.39/32", "127.0.0.0/8"], "action": "reject"}], "final": "jp"},
+}
+b.STATE = os.path.join(work, "state.json")
+b.MIHOMO_CFG = os.path.join(work, "config.yaml")
+b.RS_DIR = os.path.join(work, "rs")
+b.RS_META = os.path.join(work, "rulesets.json")
+os.makedirs(work, exist_ok=True)
+json.dump(state, open(b.STATE, "w"), ensure_ascii=False)
+b._write(b.load())
+print("[*] 出站类型:", [o["type"] for o in state["outbounds"]])
 PY
-[ -f "$WORK/cfg.json" ] || fail "拼 config 失败(parse_link 出错?)"
 
-echo "[*] sing-box check(锁定版 $SINGBOX_VER)…"
-"$SB" check -c "$WORK/cfg.json" \
-  || fail "sing-box check 不过: parse_link 生成的出站与锁定版 $SINGBOX_VER 的 schema 不符"
-echo "✅ 各协议出站在锁定版 sing-box $SINGBOX_VER 下 schema 校验通过"
+[ -f "$WORK/config.yaml" ] || fail "生成 config.yaml 失败(parse_link/render 出错?)"
+echo "[*] mihomo test(锁定版 $MIHOMO_VER)…"
+"$MIHOMO" -t -d "$WORK" || fail "mihomo test 不过: parse_link 渲染出的配置与锁定版 schema 不符"
+echo "✅ 各协议出站在锁定版 mihomo $MIHOMO_VER 下 schema 校验通过"

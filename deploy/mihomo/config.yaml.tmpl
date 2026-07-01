@@ -1,0 +1,41 @@
+tproxy-port: 7893
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: warning
+external-controller: 127.0.0.1:9090
+ipv6: false
+
+listeners:
+  - name: tg-proxy
+    type: mixed
+    port: 8445
+    listen: 0.0.0.0
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: true
+  sniff:
+    HTTP:
+      ports: [1-65535]
+    TLS:
+      ports: [1-65535]
+    QUIC:
+      ports: [1-65535]
+
+dns:
+  enable: true
+  ipv6: false
+  nameserver:
+    - 22.22.22.22
+
+proxies:
+  - name: jp
+    type: direct
+
+rules:
+  - IP-CIDR,__SERVER_IP__/32,REJECT-DROP,no-resolve
+  - IP-CIDR,127.0.0.0/8,REJECT-DROP,no-resolve
+  - MATCH,jp

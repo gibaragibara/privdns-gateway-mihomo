@@ -3,7 +3,7 @@
 #   pdg [menu] | status | update | token | restart | log [n] | uninstall [--purge]
 # 设计: 生命周期(装/更新/卸载/token/状态/日志)走这里; 出口/分流/DNS上游 走 Telegram bot。
 set -uo pipefail
-REPO_URL="https://github.com/misaka-cpu/privdns-gateway.git"
+REPO_URL="https://github.com/gibaragibara/privdns-gateway-mihomo.git"
 REPO_DIR="/opt/privdns-gateway"
 SVC="/etc/systemd/system/pdg-bot.service"
 ENVD="/etc/privdns-gateway"
@@ -34,7 +34,7 @@ pdg_fetch_release_tags(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns sing-box pdg-bot pdg-probe81; do
+  for s in mosdns mihomo pdg-bot pdg-probe81; do
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
@@ -249,7 +249,7 @@ cmd_snapshot(){
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service(相对 / 打包, 回滚直接 -C / 解开)
   tar czf "$d/snap.tar.gz" -C / \
-    etc/mosdns etc/sing-box opt/pdg-bot etc/privdns-gateway \
+    etc/mosdns etc/mihomo opt/pdg-bot etc/privdns-gateway \
     etc/nftables.conf etc/systemd/system/pdg-bot.service 2>/dev/null
   chmod 600 "$d/snap.tar.gz"
   echo "✅ 快照: $d/snap.tar.gz"
@@ -268,11 +268,10 @@ cmd_rollback(){
   target="${snaps[$idx]}"
   local f="$target/snap.tar.gz"
   [[ -f "$f" ]] || { echo "快照文件缺失: $f"; return 1; }
-  # 先校验快照里的 sing-box / nft 再动手(rule_set 路径临时指向解包目录)
+  # 先校验快照里的 mihomo / nft 再动手。
   local tmp; tmp=$(mktemp -d); tar xzf "$f" -C "$tmp"
-  if [[ -f "$tmp/etc/sing-box/config.json" ]]; then
-    sed "s#/etc/sing-box/rs/#$tmp/etc/sing-box/rs/#g" "$tmp/etc/sing-box/config.json" > "$tmp/sb.chk"
-    sing-box check -c "$tmp/sb.chk" >/dev/null 2>&1 || { echo "❌ 快照的 sing-box 配置 check 失败, 中止"; rm -rf "$tmp"; return 1; }
+  if [[ -f "$tmp/etc/mihomo/config.yaml" ]]; then
+    mihomo -t -d "$tmp/etc/mihomo" >/dev/null 2>&1 || { echo "❌ 快照的 mihomo 配置 test 失败, 中止"; rm -rf "$tmp"; return 1; }
   fi
   [[ -f "$tmp/etc/nftables.conf" ]] && { nft -c -f "$tmp/etc/nftables.conf" >/dev/null 2>&1 || { echo "❌ 快照的 nftables 语法错, 中止"; rm -rf "$tmp"; return 1; }; }
   rm -rf "$tmp"
@@ -280,7 +279,7 @@ cmd_rollback(){
   tar xzf "$f" -C /
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
-  systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null || true
+  systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
   echo "✅ 已回滚并重启服务"
 }
 
@@ -323,6 +322,8 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
+  install -m755 "$REPO_DIR"/deploy/mihomo/pdg-mihomo-tproxy.sh            /usr/local/bin/ 2>/dev/null || true
+  install -m644 "$REPO_DIR"/deploy/mihomo/mihomo.service                  /etc/systemd/system/ 2>/dev/null || true
   install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh     /usr/local/bin/pdg-set-token
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
@@ -333,8 +334,8 @@ cmd_update(){
   if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
     c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
-  if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
-    c_y "sing-box 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+  if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
+    c_y "mihomo 配置 test 失败, 回滚…"; cmd_rollback 0; return 1
   fi
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
@@ -372,9 +373,9 @@ cmd_update(){
 
 cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
-cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-probe81"; }
+cmd_restart(){ need_root restart; systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81"; }
 
-cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
+cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -n "${1:-40}" --no-pager -o cat; }
 
 cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
 
@@ -384,7 +385,7 @@ cmd_report(){ need_root report; python3 /opt/pdg-bot/report.py "$@"; }
 cmd_detect_cidr(){
   need_root detect-cidr
   local dur="${1:-30}" sip det cur
-  sip=$(grep -oE '"[0-9.]+/32"' /etc/sing-box/config.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  sip=$(grep -oE '"[0-9.]+/32"' /etc/mihomo/state.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
   det=$(bash "$REPO_DIR/lib/detect-internal-range.sh" "$dur" "${sip:-本机IP}" || true)
   if [[ -z "$det" ]]; then
     c_y "没抓到。确认手机走内网卡(关 WiFi), 或云安全组放行入站 80/ICMP, 再重试。"; return 1
@@ -414,7 +415,7 @@ cmd_ios(){
   local CERT=/etc/mosdns/certs/fullchain.pem; [[ -f /etc/dnsdist/certs/fullchain.pem ]] && CERT=/etc/dnsdist/certs/fullchain.pem
   local HOST IP CIDR
   HOST=$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null | grep -oE 'CN *= *[A-Za-z0-9.*-]+' | sed 's/.*= *//')
-  IP=$(grep -oE '"[0-9.]+/32"' /etc/sing-box/config.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  IP=$(grep -oE '"[0-9.]+/32"' /etc/mihomo/state.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
   [[ -n "$IP" ]] || IP=$(curl -fsSL --max-time 6 https://api.ipify.org)
   CIDR=$(grep -oE 'ip saddr [0-9./]+' /etc/nftables.conf 2>/dev/null | head -1 | awk '{print $3}')
   [[ -n "$HOST" && -n "$IP" && -n "$CIDR" ]] || { echo "信息不全 (HOST=$HOST IP=$IP CIDR=$CIDR)"; return 1; }

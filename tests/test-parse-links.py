@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""parse_link 回归: 各类代理链接 + Surge ss 行 → 正确 sing-box 出站 dict。纯 stdlib, CI 可跑。
+"""parse_link 回归: 各类代理链接 + Surge ss 行 → 正确内部出站 dict。纯 stdlib, CI 可跑。
 嵌套字段用 __ 表示层级, 如 tls__server_name → tls.server_name。"""
 import base64
 import importlib.util

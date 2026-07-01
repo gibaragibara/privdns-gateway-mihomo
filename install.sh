@@ -5,16 +5,16 @@
 # 非交互/自动化: 预置 PDG_* 环境变量 + PDG_NONINTERACTIVE=1 (见 docs/INSTALL.md)。
 #   PDG_SERVER_IP PDG_SSH_PORT PDG_INTERNAL_CIDR PDG_BOT_TOKEN PDG_ALLOWED PDG_DOT_DOMAIN
 #   PDG_SKIP_CERT=1  跳过 certbot, 生成自签占位证书 (之后用 bot 补正式证书)
-# 做什么: 装 mosdns + sing-box(1.12) + 管理 bot + 防火墙 + DoT 证书。
+# 做什么: 装 mosdns + mihomo(TPROXY) + 管理 bot + 防火墙 + DoT 证书。
 #   自动识别公网IP / 内网卡段; DNS(域名 A 记录) 那步留给你自己做; 落地出口装好后用 bot 加。
 # 也支持 curl|bash 直接跑: curl -fsSL <raw>/install.sh | sudo bash  (脚本会自动拉取仓库)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO_URL="https://github.com/misaka-cpu/privdns-gateway.git"
+REPO_URL="https://github.com/gibaragibara/privdns-gateway-mihomo.git"
 CERT_DIR="/etc/mosdns/certs"
 NONINT="${PDG_NONINTERACTIVE:-}"
-# 二进制版本(MOSDNS_VER/SINGBOX_VER)+ 钉死 SHA256 来自 lib/versions.sh, 自举进仓库后 source(见下)
+# 二进制版本(MOSDNS_VER/MIHOMO_VER)+ 钉死 SHA256 来自 lib/versions.sh, 自举进仓库后 source(见下)
 
 c_g(){ echo -e "\033[1;32m[*]\033[0m $*"; }
 c_y(){ echo -e "\033[1;33m[!]\033[0m $*"; }
@@ -75,7 +75,7 @@ source "$REPO_DIR/lib/versions.sh"
 
 # ── 事务性安装: 失败自动回滚(只撤本次新装的, 不误伤既有可用部署)──
 INSTALL_OK=0; ROLLBACK_DONE=0; FORCED_REINSTALL=0
-PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; SINGBOX_INSTALLED=0; RESOLVED_DISABLED=0
+PRIOR_INSTALL=0; MOSDNS_INSTALLED=0; MIHOMO_INSTALLED=0; RESOLVED_DISABLED=0
 [[ -f /opt/pdg-bot/bot.py || -x /usr/local/bin/pdg ]] && PRIOR_INSTALL=1
 
 # 已有部署: install.sh 会重写配置, 半途失败难以无损还原 → 默认拒绝, 引导走 pdg update(带快照+回滚)。
@@ -100,17 +100,18 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box \
+  systemctl disable --now pdg-bot pdg-probe81 mosdns mihomo \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
         /etc/systemd/system/journald.conf.d/50-pdg.conf
   systemctl daemon-reload 2>/dev/null
   nft delete table inet pdg 2>/dev/null
-  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway
-  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
+  /usr/local/bin/pdg-mihomo-tproxy.sh down 2>/dev/null || true
+  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway
+  rm -f /usr/local/bin/{pdg,pdg-set-token,pdg-mihomo-tproxy.sh,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
   [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
-  [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
+  [[ "$MIHOMO_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mihomo
   # 还原系统级改动(仅全新安装才到这里)
   if [[ -e /etc/nftables.conf.pdg-orig ]]; then
     cp -a /etc/nftables.conf.pdg-orig /etc/nftables.conf 2>/dev/null
@@ -128,7 +129,7 @@ trap 'on_exit $?' EXIT
 c_g "安装依赖…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl tar unzip nftables python3 openssl certbot dnsutils tcpdump jq ca-certificates vnstat >/dev/null
+apt-get install -y -qq curl tar unzip gzip nftables iproute2 python3 openssl certbot dnsutils tcpdump jq ca-certificates vnstat >/dev/null
 systemctl enable --now vnstat >/dev/null 2>&1 || true   # 网卡流量统计(轻量, ~3MB)
 
 # ── 2. mosdns ──
@@ -136,23 +137,23 @@ if ! command -v mosdns >/dev/null; then
   c_g "下载 mosdns $MOSDNS_VER ($MARCH)…"
   t=$(mktemp -d)
   curl -fsSL "https://github.com/IrineSistiana/mosdns/releases/download/${MOSDNS_VER}/mosdns-linux-${MARCH}.zip" -o "$t/m.zip"
-  pdg_verify_sha256 "$t/m.zip" "${PDG_SHA256[mosdns-$MARCH]:-}" "mosdns $MOSDNS_VER ($MARCH)" \
+  pdg_verify_sha256 "$t/m.zip" "$(pdg_sha256 "mosdns-$MARCH")" "mosdns $MOSDNS_VER ($MARCH)" \
     || { rm -rf "$t"; die "mosdns 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
   (cd "$t" && unzip -q m.zip && install -m755 mosdns /usr/local/bin/mosdns)
   MOSDNS_INSTALLED=1
   rm -rf "$t"
 fi
 
-# ── 3. sing-box 1.12.x ──
-if ! sing-box version 2>/dev/null | grep -q "version 1.12"; then
-  c_g "下载 sing-box $SINGBOX_VER ($MARCH)…"
+# ── 3. mihomo ──
+if ! mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}"; then
+  c_g "下载 mihomo $MIHOMO_VER ($MARCH)…"
   t=$(mktemp -d)
-  curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-${MARCH}.tar.gz" -o "$t/sb.tgz"
-  pdg_verify_sha256 "$t/sb.tgz" "${PDG_SHA256[singbox-$MARCH]:-}" "sing-box $SINGBOX_VER ($MARCH)" \
-    || { rm -rf "$t"; die "sing-box 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
-  tar -xzf "$t/sb.tgz" -C "$t"
-  install -m755 "$t"/sing-box-*/sing-box /usr/local/bin/sing-box
-  SINGBOX_INSTALLED=1
+  curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VER}/mihomo-linux-${MARCH}-v${MIHOMO_VER}.gz" -o "$t/mihomo.gz"
+  pdg_verify_sha256 "$t/mihomo.gz" "$(pdg_sha256 "mihomo-$MARCH")" "mihomo $MIHOMO_VER ($MARCH)" \
+    || { rm -rf "$t"; die "mihomo 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
+  gzip -dc "$t/mihomo.gz" > "$t/mihomo"
+  install -m755 "$t/mihomo" /usr/local/bin/mihomo
+  MIHOMO_INSTALLED=1
   rm -rf "$t"
 fi
 
@@ -203,7 +204,8 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d /etc/mosdns/rules /etc/mihomo/rs /etc/nftables.d /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+[[ -f /etc/nftables.d/ss-relay.nft ]] || : > /etc/nftables.d/ss-relay.nft
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
@@ -217,11 +219,13 @@ install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh       /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
+install -m755 "$REPO_DIR"/deploy/mihomo/pdg-mihomo-tproxy.sh              /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh                     /usr/local/bin/pdg-set-token
 install -m755 "$REPO_DIR"/deploy/bot/pdg.sh                               /usr/local/bin/pdg
 # 把仓库放到 /opt/privdns-gateway 供 `pdg update` / `pdg uninstall` 用
 if [[ "$REPO_DIR" != "/opt/privdns-gateway" ]]; then
-  [[ -d /opt/privdns-gateway/.git ]] || { rm -rf /opt/privdns-gateway; cp -a "$REPO_DIR" /opt/privdns-gateway 2>/dev/null || true; }
+  rm -rf /opt/privdns-gateway
+  cp -a "$REPO_DIR" /opt/privdns-gateway 2>/dev/null || true
 fi
 : > /etc/mosdns/rules/custom_direct.txt
 : > /etc/mosdns/rules/unlock.txt          # WDA 解锁域名集(空=休眠; bot『🔓 解锁走 WDA』填充)
@@ -230,8 +234,16 @@ render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNA
               -e "s|__CERT_DIR__|$CERT_DIR|g"   -e "s|__SSH_PORT__|$SSH_PORT|g" "$1"; }
 
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
-render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json
-chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出口密码/uuid
+if [[ -f /etc/mihomo/state.json ]]; then
+  c_g "保留已有 mihomo state (/etc/mihomo/state.json)…"
+elif [[ -f /etc/sing-box/config.json ]]; then
+  install -m600 /etc/sing-box/config.json /etc/mihomo/state.json
+  [[ -d /etc/sing-box/rs ]] && cp -a /etc/sing-box/rs/. /etc/mihomo/rs/ 2>/dev/null || true
+else
+  render "$REPO_DIR/deploy/mihomo/state.json.tmpl"    > /etc/mihomo/state.json
+fi
+render "$REPO_DIR/deploy/mihomo/config.yaml.tmpl"     > /etc/mihomo/config.yaml
+chmod 700 /etc/mihomo; chmod 600 /etc/mihomo/state.json /etc/mihomo/config.yaml   # config 含出口密码/uuid
 [[ -e /etc/nftables.conf.pdg-orig ]] || cp -a /etc/nftables.conf /etc/nftables.conf.pdg-orig 2>/dev/null || true  # 供 uninstall 还原
 render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
@@ -248,6 +260,14 @@ install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer         /etc/systemd/syste
 install -m644 "$REPO_DIR"/deploy/ios/pdg-probe81.service      /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/firewall/journald-50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf
 
+python3 - <<'PY'
+import importlib.util
+spec = importlib.util.spec_from_file_location("pdg_bot", "/opt/pdg-bot/bot.py")
+bot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bot)
+bot._write(bot.load())
+PY
+
 cat > /etc/systemd/system/mosdns.service <<'EOF'
 [Unit]
 Description=mosdns
@@ -260,19 +280,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-cat > /etc/systemd/system/sing-box.service <<'EOF'
-[Unit]
-Description=sing-box
-After=network-online.target
-Wants=network-online.target
-[Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-[Install]
-WantedBy=multi-user.target
-EOF
+install -m644 "$REPO_DIR"/deploy/mihomo/mihomo.service /etc/systemd/system/
 
 # ── 6. DoT 证书 ──
 if [[ -n "${PDG_SKIP_CERT:-}" ]]; then
@@ -286,11 +294,15 @@ else
   c_y "现在签 DoT 证书。请先确认: $DOT_DOMAIN 的 A 记录已指向 $SERVER_IP"
   c_y "(Cloudflare 等用『灰云 / DNS only』, 不要开代理; 等生效后再继续)"
   [[ -n "$NONINT" ]] || read -rp "A 记录已指好? 回车继续签发 / Ctrl-C 退出去配 DNS: " _
-  certbot certonly --standalone -d "$DOT_DOMAIN" --non-interactive --agree-tos \
-    --register-unsafely-without-email --keep-until-expiring \
-    --pre-hook  /usr/local/bin/proxy-gateway-open-cert-http.sh \
-    --post-hook /usr/local/bin/proxy-gateway-restore-firewall.sh \
-    || die "证书签发失败: 检查 A 记录是否已生效、80 口是否能从公网到达"
+  if [[ -f "/etc/letsencrypt/live/$DOT_DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOT_DOMAIN/privkey.pem" ]]; then
+    c_g "检测到已有 Let's Encrypt 证书, 直接复用: $DOT_DOMAIN"
+  else
+    certbot certonly --standalone -d "$DOT_DOMAIN" --non-interactive --agree-tos \
+      --register-unsafely-without-email --keep-until-expiring \
+      --pre-hook  /usr/local/bin/proxy-gateway-open-cert-http.sh \
+      --post-hook /usr/local/bin/proxy-gateway-restore-firewall.sh \
+      || die "证书签发失败: 检查 A 记录是否已生效、80 口是否能从公网到达"
+  fi
   echo "$DOT_DOMAIN" > /opt/pdg-bot/dot-domain
   install -m644 "/etc/letsencrypt/live/$DOT_DOMAIN/fullchain.pem" "$CERT_DIR/fullchain.pem"
   install -m600 "/etc/letsencrypt/live/$DOT_DOMAIN/privkey.pem"   "$CERT_DIR/privkey.pem"
@@ -311,7 +323,11 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns sing-box pdg-probe81 >/dev/null 2>&1 || true
+mithomo_ok=0
+mihomo -t -d /etc/mihomo >/dev/null 2>&1 && mithomo_ok=1
+[[ "$mithomo_ok" == 1 ]] || die "mihomo 配置测试失败, 中止切换"
+systemctl disable --now sing-box 2>/dev/null || true
+systemctl enable --now mosdns mihomo pdg-probe81 >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -333,7 +349,7 @@ c_g "校验核心服务(需连续保持 active, 防起来又崩)…"
 svc_ok=0; streak=0
 for _ in $(seq 1 20); do
   allact=1
-  for s in mosdns sing-box pdg-probe81; do
+  for s in mosdns mihomo pdg-probe81; do
     [[ "$(systemctl is-active "$s" 2>/dev/null)" == active ]] || allact=0
   done
   if [[ "$allact" == 1 ]]; then streak=$((streak+1)); else streak=0; fi
@@ -341,15 +357,15 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 if [[ "$svc_ok" != 1 ]]; then
-  for s in mosdns sing-box pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
-  journalctl -u mosdns -u sing-box -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
+  for s in mosdns mihomo pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
+  journalctl -u mosdns -u mihomo -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
   die "核心服务未能持续保持运行(见上日志)。"   # → 触发回滚
 fi
 INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打印, 不再回滚
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
-for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+for s in mosdns mihomo pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"
