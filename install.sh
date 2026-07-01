@@ -204,8 +204,7 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/mihomo/rs /etc/nftables.d /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
-[[ -f /etc/nftables.d/ss-relay.nft ]] || : > /etc/nftables.d/ss-relay.nft
+install -d /etc/mosdns/rules /etc/mihomo/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
