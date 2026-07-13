@@ -5,7 +5,7 @@
 <text x="14" y="22" fill="#ffffff" font-family="sans-serif" font-size="12" font-weight="500">PrivDNS Gateway</text>
 <rect x="12" y="44" width="226" height="150" rx="10" fill="#1c2a39"/>
 <g font-family="sans-serif" font-size="10.5">
-<text x="22" y="62" fill="#7fd28a">🟢 mosdns / sing-box / pdg-bot 都在</text>
+<text x="22" y="62" fill="#7fd28a">🟢 mosdns / mihomo / pdg-bot 都在</text>
 <text x="22" y="80" fill="#c7d4e0">DoT: dot.example.com</text>
 <text x="22" y="97" fill="#c7d4e0">IP: 203.0.113.10</text>
 <text x="22" y="114" fill="#c7d4e0">出口(5): hk, tw, jp, us, auto</text>

@@ -23,6 +23,15 @@ mihomo TPROXY 透明接入后嗅探 SNI/Host/QUIC 再决定走哪个落地。
 
 ---
 
+## 与上游的关系
+
+本仓 fork 自 [misaka-cpu/privdns-gateway](https://github.com/misaka-cpu/privdns-gateway),流量层改为 **mihomo TPROXY**。
+上游新功能请按 [docs/UPSTREAM.md](docs/UPSTREAM.md) **手工移植**,不要用 GitHub Sync fork 强合同步。
+
+当前版本已吸收上游 v1.1.x 中适合本架构的改动(iOS Wi-Fi 探测/SSID、出口改名、GMS 端口、doctor 加固等),并额外做了 bot 异步、安卓 Wi-Fi DoT、WhatsApp 真实 IP。
+
+---
+
 ## ⚠️ 这个项目适合谁 / 前提
 
 它**不是通用翻墙工具**,依赖一个特定拓扑:
@@ -106,13 +115,15 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 | 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
 | 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
 | 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |
-| 防火墙 | **nftables** | 对全网只留 SSH;DNS/探测/管理口只放行内网卡来源段;内网 tcp/udp TPROXY 到 mihomo |
+| 防火墙 | **nftables** | 全网 SSH + **DoT 853**;53/80/81/443/5228-5230/8445 等仅内网卡;内网 tcp/udp TPROXY 到 mihomo |
 
 ## 文档
 
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — 新手图文
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/production-notes.md](docs/production-notes.md) — 实战记录 / 架构背景
+- [docs/UPSTREAM.md](docs/UPSTREAM.md) — 与上游关系 / 如何吸收新提交
+- [docs/production-notes.md](docs/production-notes.md) — 架构说明
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志
 
 ## 免责声明

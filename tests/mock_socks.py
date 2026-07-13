@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""极简 SOCKS5 出口桩: 接受 sing-box 的 socks 出站, 记录它要 CONNECT 的目标(host:port)到日志文件。
+"""极简 SOCKS5 出口桩: 接受 mihomo 的 socks 出站, 记录它要 CONNECT 的目标(host:port)到日志文件。
 
 只为功能测试断言"分流去了哪个出口", 不做真正转发: 完成握手 → 记录目标 → 读掉首包 → 关闭。
 用法: mock_socks.py <port> <logfile>

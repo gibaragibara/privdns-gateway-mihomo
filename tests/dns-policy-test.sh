@@ -119,7 +119,7 @@ expect_nonempty "国内域名 AAAA → 不被置空(走上游)"    "$(q www.qq.c
 note "渲染(内网段=10.200.0.0/16, 本机=外部来源)并重起 mosdns…"
 render_conf "10.200.0.0/16"; start_mosdns
 expect_eq      "外部来源: 代理域名 A 不劫持, 走上游"  "$(q example.com A)"     "$UPSTREAM_IP"
-# WDA 解锁支: 本机(sing-box 直出源)查解锁域名 → 走解锁 DNS(非普通上游)。
+# WDA 解锁支: 本机(mihomo 直出源)查解锁域名 → 走解锁 DNS(非普通上游)。
 # 若 main_sequence 漏了 `jump has_resp`, 解锁答案会被 remote_upstream 覆盖成 $UPSTREAM_IP → 此断言即失败。
 expect_eq      "WDA解锁支: 解锁域名 → 解锁DNS(非普通上游)" "$(q unlktest.example A)" "$UNLOCK_IP"
 # 落地模式回归: 清空 unlock.txt → 解锁支休眠, 解锁域名回落普通上游(关 WDA 必须清空 unlock.txt 才彻底)

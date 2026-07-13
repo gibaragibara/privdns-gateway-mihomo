@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""向 sing-box direct 入口发一个带指定 SNI 的 TLS ClientHello, 触发 SNI 嗅探。
+"""向 mihomo direct 入口发一个带指定 SNI 的 TLS ClientHello, 触发 SNI 嗅探。
 
 对端是 mock SOCKS5(不会完成 TLS), 所以握手必然失败 —— 我们只需要把 ClientHello 发出去
-让 sing-box 嗅到 SNI 并据此分流。用法: sni_client.py <host> <port> <sni>
+让 mihomo 嗅到 SNI 并据此分流。用法: sni_client.py <host> <port> <sni>
 """
 import socket
 import ssl

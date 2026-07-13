@@ -123,7 +123,7 @@ Telegram 给 bot 发 `/start`,出现主菜单:
 </p>
 
 - **📤 出口管理 → ➕ 添加**:直接粘贴节点链接。
-  > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。其它(shadowtls / ssh / wireguard 等)手写 `/etc/sing-box/config.json`。
+  > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。其它(shadowtls / ssh / wireguard 等)手写 `/etc/mihomo/state.json`。
 - **📑 分流管理**:把域名或规则集指到某个出口;不指的默认走「其余国际」的默认出口。
 - **🚦 测出口**:看各出口的延迟、是否可用。
 

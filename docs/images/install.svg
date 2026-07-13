@@ -8,7 +8,7 @@
 <text x="12" y="66" fill="#c7d4e0">[*] 未在仓库目录内运行 → 自动拉取 privdns-gateway…</text>
 <text x="12" y="84" fill="#c7d4e0">[*] 安装依赖…</text>
 <text x="12" y="102" fill="#c7d4e0">[*] 下载 mosdns v5.3.4 (amd64)…</text>
-<text x="12" y="120" fill="#c7d4e0">[*] 下载 sing-box 1.12.9 (amd64)…</text>
+<text x="12" y="120" fill="#c7d4e0">[*] 下载 mihomo 1.12.9 (amd64)…</text>
 <text x="12" y="138" fill="#c7d4e0">[*] 识别内网卡来源段(抓包 ~90s)…  抓到: 172.22.0.0/16</text>
 <text x="12" y="156" fill="#c7d4e0">[*] 签发 DoT 证书 / 起服务 / 应用防火墙…</text>
 <text x="12" y="178" fill="#5fd35f">[*] 安装完成。手机私密 DNS 填: dot.example.com</text>

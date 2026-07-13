@@ -2,6 +2,13 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.1(整理:文档对齐 mihomo + 上游同步策略)
+
+- **不 Sync fork**:文档明确与上游的关系与移植流程 → [docs/UPSTREAM.md](docs/UPSTREAM.md)。
+- 上游 v1.1.11–v1.1.16 中需要的能力已在 v1.2.0 按 mihomo 架构吸收完毕,本版不再强合上游 main。
+- 排障手册 / QUICKSTART / forum-post / production-notes 去掉 sing-box 表述,统一为 mihomo TPROXY。
+- CI 文案与功能测试说明改为 mihomo;README 防火墙口径与 853 公网一致。
+
 ## 2026-07-13 — v1.2.0-mihomo(同步上游 + bot 加速 + 安卓 Wi-Fi DoT + iOS WhatsApp)
 
 整合自上游 [misaka-cpu/privdns-gateway](https://github.com/misaka-cpu/privdns-gateway) 与 5GPN-X 思路,适配 **mihomo TPROXY** 版:
