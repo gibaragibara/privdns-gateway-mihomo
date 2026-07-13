@@ -28,7 +28,7 @@ mihomo TPROXY 透明接入后嗅探 SNI/Host/QUIC 再决定走哪个落地。
 本仓 fork 自 [misaka-cpu/privdns-gateway](https://github.com/misaka-cpu/privdns-gateway),流量层改为 **mihomo TPROXY**。
 上游新功能请按 [docs/UPSTREAM.md](docs/UPSTREAM.md) **手工移植**,不要用 GitHub Sync fork 强合同步。
 
-当前版本已吸收上游 v1.1.x 中适合本架构的改动(iOS Wi-Fi 探测/SSID、出口改名、GMS 端口、doctor 加固等),并额外做了 bot 异步、安卓 Wi-Fi DoT、WhatsApp 真实 IP。
+当前版本已吸收上游 v1.1.x 适合本架构的改动,并对照 [5GPN-X](https://github.com/Xiuyixx/5GPN-X) 做了 bot 异步(含删凭据消息)、安卓 Wi-Fi DoT(853 公网)、iOS WhatsApp 真实 IP(TPROXY 适配,非 wa-shim)。
 
 ---
 

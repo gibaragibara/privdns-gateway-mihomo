@@ -160,21 +160,26 @@ def edit(chat, mid, text, kb=None):
         return
     send(chat, text, kb)             # 仍不行(如消息已删)再发新消息
 
-def answer_cb_async(cb_id):
+def answer_cb_async(cb_id, text=None, show_alert=False):
     """后台停掉按钮转圈(独立连接, 不占用主 keep-alive、不阻塞主循环)。
-    主循环改完内容(edit)就能立刻回到 getUpdates → 连续点菜单不再为'停转圈'多等一个来回。"""
+    对齐 5GPN-X: 用专用线程池, 可选提示「正在处理」。"""
     def go():
         try:
+            body = {"callback_query_id": cb_id}
+            if text:
+                body["text"] = text
+                body["show_alert"] = bool(show_alert)
             urllib.request.urlopen(urllib.request.Request(
                 "https://api.telegram.org/bot" + TOKEN + "/answerCallbackQuery",
-                data=json.dumps({"callback_query_id": cb_id}).encode(),
+                data=json.dumps(body).encode(),
                 headers={"Content-Type": "application/json"}), timeout=20).read()
         except Exception:  # noqa: BLE001
             pass
-    threading.Thread(target=go, daemon=True).start()
+    _CB_EXECUTOR.submit(go)
 
-# 慢操作后台跑, 主 long-poll 不堵: 测出口/自检/加出口/签证书等
-_BG = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdg-bg")
+# 慢操作后台跑, 主 long-poll 不堵(思路对齐 5GPN-X tgbot: background + BUSY)
+_BG = ThreadPoolExecutor(max_workers=6, thread_name_prefix="pdg-bg")
+_CB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pdg-cb")
 _BUSY = set()
 _BUSY_LOCK = threading.Lock()
 
@@ -187,7 +192,7 @@ def run_bg(fn, *args, **kwargs):
     _BG.submit(go)
 
 def edit_bg(chat, mid, text_fn, kb=None, busy_key=None):
-    """先立刻回主循环, 后台算 text_fn() 再 edit。同一消息未完成前点第二次直接忽略。"""
+    """先立刻回主循环, 后台算 text_fn() 再 edit。同一消息未完成前点第二次返回 False。"""
     key = busy_key or (chat, mid)
     with _BUSY_LOCK:
         if key in _BUSY:
@@ -214,6 +219,20 @@ def send_bg(chat, text_fn, kb=None):
         except Exception as e:  # noqa: BLE001
             print("send_bg err", e, flush=True)
     _BG.submit(go)
+
+def delete_message(chat, mid):
+    """尽量删掉含节点密码的消息(对齐 5GPN-X process_add_exit_message)。"""
+    if mid is None:
+        return False
+    try:
+        r = post("deleteMessage", {"chat_id": chat, "message_id": mid})
+        return bool(isinstance(r, dict) and r.get("ok"))
+    except Exception:  # noqa: BLE001
+        return False
+
+def is_busy(chat, mid):
+    with _BUSY_LOCK:
+        return (chat, mid) in _BUSY
 
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -1865,7 +1884,12 @@ def kb_pick_named(prefix, items, back=BACK):
     return {"inline_keyboard": rows}
 
 # ── 回调 (原地编辑) ──
-def handle_cb(chat, mid, data):
+def handle_cb(chat, mid, data, cb_id=None):
+    # 对齐 5GPN-X: 同一消息上一项慢操作未完成时, 提示稍候, 不重复排队
+    if is_busy(chat, mid) and data not in ("menu", "status") and not str(data).startswith("nav:"):
+        if cb_id:
+            answer_cb_async(cb_id, "正在处理上一项操作，请稍候…")
+        return
     if data in ("menu", "status") or data.startswith("nav:"):
         state.pop(chat, None); del_sel.pop(chat, None)   # 返回/切页 = 放弃进行中的输入流程和勾选
     if data in ("menu", "status"):
@@ -1934,7 +1958,11 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "改到哪个出口:", {"inline_keyboard": rows}); return
     if data.startswith("ero:"):
         _, idx, target = data.split(":", 2)
-        ok, msg = reassign_rule(int(idx), target); edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
+        edit(chat, mid, "⏳ 正在改出口…", RULE_BACK)
+        def _ero(i=int(idx), t=target):
+            ok, msg = reassign_rule(i, t)
+            edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK)
+        run_bg(_ero); return
     if data == "order_exit":
         state[chat] = "order_exit"
         cur = [o["tag"] for o in load()["outbounds"]]
@@ -1969,8 +1997,11 @@ def handle_cb(chat, mid, data):
             _, kb = del_rule_kb(chat)
             edit(chat, mid, "还没勾选域名。勾选后再点「✅ 确认删除」:", kb); return
         edit(chat, mid, f"⏳ 正在删除 {len(doms)} 个域名并重启 mihomo…", RULE_BACK)
-        ok, msg = del_rules_bulk(doms); del_sel.pop(chat, None)
-        edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
+        del_sel.pop(chat, None)
+        def _dd(ds=list(doms)):
+            ok, msg = del_rules_bulk(ds)
+            edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK)
+        run_bg(_dd); return
     if data == "testdom":
         state[chat] = "test_dom"
         edit(chat, mid, "发个域名, 查它走哪个出口/规则(还是国内直连)。\n例: <code>netflix.com</code>\n/cancel 取消。", RULE_BACK); return
@@ -2001,11 +2032,15 @@ def handle_cb(chat, mid, data):
              f"当前: <b>{cur or '默认出口'}</b>\n手机里 Telegram→设置→数据和存储→代理 填 SOCKS5 <code>{_server_ip()}:8445</code>。",
              {"inline_keyboard": rows}); return
     if data.startswith("tgx:"):
-        ok, msg = set_tg_exit(data[4:])
-        if ok:
-            msg += ("\n\n在 Telegram → 设置 → 数据和存储 → 代理 → 加 <b>SOCKS5</b>:\n"
-                    f"服务器 <code>{_server_ip()}</code>\n端口 <code>8445</code>\n(无需用户名/密码)")
-        edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
+        target = data[4:]
+        edit(chat, mid, "⏳ 正在切换 Telegram 出口…", MENU)
+        def _tgx(t=target):
+            ok, msg = set_tg_exit(t)
+            if ok:
+                msg += ("\n\n在 Telegram → 设置 → 数据和存储 → 代理 → 加 <b>SOCKS5</b>:\n"
+                        f"服务器 <code>{_server_ip()}</code>\n端口 <code>8445</code>\n(无需用户名/密码)")
+            edit(chat, mid, msg if ok else ("❌ " + msg), MENU)
+        run_bg(_tgx); return
     if data == "del_exit":
         tags = deletable_tags(load())
         edit(chat, mid, "选择要删除的出口/故障组：" if tags else "没有可删的出口",
@@ -2076,8 +2111,11 @@ def handle_cb(chat, mid, data):
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data in ("wda:on", "wda:off"):
         edit(chat, mid, "正在切换解锁模式…", DNS_BACK)
-        ok, msg = set_wda_mode(data == "wda:on")
-        edit(chat, mid, msg if ok else ("❌ " + msg), DNS_BACK); return
+        on = data == "wda:on"
+        def _wda(v=on):
+            ok, msg = set_wda_mode(v)
+            edit(chat, mid, msg if ok else ("❌ " + msg), DNS_BACK)
+        run_bg(_wda); return
     if data == "tfo":
         on = _tfo_on(load())
         edit(chat, mid, f"🚀 <b>TCP Fast Open</b>\n当前: <b>{'开启' if on else '关闭'}</b>\n"
@@ -2086,41 +2124,61 @@ def handle_cb(chat, mid, data):
                                   [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data in ("tfo:on", "tfo:off"):
-        ok, msg = set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
+        on = data == "tfo:on"
+        edit(chat, mid, "⏳ 正在切换 TFO…", OPS_BACK)
+        def _tfo(v=on):
+            ok, msg = set_tfo(v)
+            edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK)
+        run_bg(_tfo); return
     if data == "restart":
-        ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
-        edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK); return
+        edit(chat, mid, "⏳ 正在重启 mihomo + mosdns…", OPS_BACK)
+        def _rst():
+            ok, msg = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"])
+            edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK)
+        run_bg(_rst); return
     if data == "updgeo":
         edit(chat, mid, "正在更新 geosite + 规则集…", OPS_BACK)
-        r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
-        edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0
-                         else "geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:]), OPS_BACK); return
+        def _geo():
+            r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
+            edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0
+                             else "geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:]), OPS_BACK)
+        run_bg(_geo); return
     if data.startswith("delx:"):
         tag = data[5:]
-        def mod(c):
-            c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != tag]
-            for o in c["outbounds"]:
-                if o.get("type") == "urltest":
-                    o["outbounds"] = [m for m in o.get("outbounds", []) if m != tag]
-            c["outbounds"] = [o for o in c["outbounds"]
-                              if not (o.get("type") == "urltest" and not o.get("outbounds"))]
-            live = {o["tag"] for o in c["outbounds"]}
-            for r in c["route"]["rules"]:
-                if r.get("outbound") and r["outbound"] not in live:
-                    r["outbound"] = c["route"].get("final", "hk")
-            if c["route"].get("final") not in live:
-                c["route"]["final"] = next((t for t in exit_tags(c)), "direct")
-        ok, msg = apply_sb(mod)
-        edit(chat, mid, f"✅ 已删除 {tag}" if ok else msg, EXIT_BACK); return
+        edit(chat, mid, f"⏳ 正在删除 {tag}…", EXIT_BACK)
+        def _delx(t=tag):
+            def mod(c):
+                c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != t]
+                for o in c["outbounds"]:
+                    if o.get("type") == "urltest":
+                        o["outbounds"] = [m for m in o.get("outbounds", []) if m != t]
+                c["outbounds"] = [o for o in c["outbounds"]
+                                  if not (o.get("type") == "urltest" and not o.get("outbounds"))]
+                live = {o["tag"] for o in c["outbounds"]}
+                for r in c["route"]["rules"]:
+                    if r.get("outbound") and r["outbound"] not in live:
+                        r["outbound"] = c["route"].get("final", "hk")
+                if c["route"].get("final") not in live:
+                    c["route"]["final"] = next((x for x in exit_tags(c)), "direct")
+            ok, msg = apply_sb(mod)
+            edit(chat, mid, f"✅ 已删除 {t}" if ok else msg, EXIT_BACK)
+        run_bg(_delx); return
     if data.startswith("fin:"):
         tag = data[4:]
-        ok, msg = apply_sb(lambda c: c["route"].__setitem__("final", tag))
-        edit(chat, mid, f"✅ 默认出口 → {tag}" if ok else msg, EXIT_BACK); return
+        edit(chat, mid, f"⏳ 正在切换默认出口 → {tag}…", EXIT_BACK)
+        def _fin(t=tag):
+            ok, msg = apply_sb(lambda c: c["route"].__setitem__("final", t))
+            edit(chat, mid, f"✅ 默认出口 → {t}" if ok else msg, EXIT_BACK)
+        run_bg(_fin); return
     if data.startswith("delrs:"):
-        ok, msg = del_ruleset(data[6:]); edit(chat, mid, ("✅ " if ok else "") + msg, RULE_BACK); return
+        edit(chat, mid, "⏳ 正在删除规则集…", RULE_BACK)
+        def _drs(name=data[6:]):
+            ok, msg = del_ruleset(name)
+            edit(chat, mid, ("✅ " if ok else "") + msg, RULE_BACK)
+        run_bg(_drs); return
 
 # ── 文本 ──
-def handle_text(chat, text):
+def handle_text(chat, text, msg_id=None):
     text = text.strip()
     if text == "/cancel":
         state.pop(chat, None); send_plain(chat, "已取消"); return
@@ -2180,50 +2238,76 @@ def handle_text(chat, text):
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.pop(chat, None) or ""   # 无待输入时为 "", 避免下面 act.startswith(...) 在 None 上崩
     if act == "add_exit":
-        # 粘贴凭证后立刻 ACK, 解析/校验/重启 mihomo 后台做, 避免 bot 卡顿
-        send_plain(chat, "⏳ 正在解析并写入出口…")
-        def _add(link=text):
+        # 对齐 5GPN-X: 立刻删含密码消息 + 后台解析写入, 主循环不堵
+        link = text
+        mid = msg_id
+        text = ""  # 尽快丢掉本地副本引用(后台闭包另持 link)
+        def _add(payload=link, message_id=mid):
+            warn = ""
             try:
-                ob = parse_link(link)
+                deleted = delete_message(chat, message_id)
+                if not deleted and message_id is not None:
+                    warn = "\n\n⚠️ 未能自动删除含凭据的消息, 请手动删掉上一条节点链接。"
+                ob = parse_link(payload)
                 def mod(c):
                     c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != ob["tag"]]
                     c["outbounds"].append(ob)
                 ok, msg = apply_sb(mod)
-                send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
+                if ok:
+                    send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" + warn)
+                else:
+                    send_plain(chat, msg + warn)
             except Exception as e:  # noqa: BLE001
-                send_plain(chat, f"解析失败: {e}")
+                send_plain(chat, f"解析失败: {e}" + warn)
+            finally:
+                payload = ""  # noqa: F841
+        send_plain(chat, "⏳ 正在后台解析并写入出口…")
         run_bg(_add); return
     if act == "add_group":
         p = text.split()
         if len(p) < 3:
             send_plain(chat, "格式: 组名 出口1 出口2 …(至少2个出口)"); return
-        ok, msg = add_group(p[0], p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        send_plain(chat, "⏳ 正在创建故障组…")
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(add_group(p[0], p[1:])))); return
     if act == "order_exit":
-        ok, msg = reorder_exits(text.replace(",", " ").split()); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        order = text.replace(",", " ").split()
+        send_plain(chat, "⏳ 正在更新出口顺序…")
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(reorder_exits(order)))); return
     if act.startswith("edit_grp:"):
-        ok, msg = add_group(act.split(":", 1)[1], text.replace(",", " ").split())
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        name = act.split(":", 1)[1]
+        members = text.replace(",", " ").split()
+        send_plain(chat, "⏳ 正在更新故障组…")
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(add_group(name, members)))); return
     if act.startswith("rename_exit:"):
-        ok, msg = rename_exit(act.split(":", 1)[1], text)
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        old = act.split(":", 1)[1]
+        new = text
+        send_plain(chat, f"⏳ 正在重命名 <b>{old}</b>…")
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(rename_exit(old, new)))); return
     if act == "add_rule":
         p = text.split()
-        send_plain(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
-        return
+        if len(p) != 2:
+            send_plain(chat, "格式: 域名 出口"); return
+        send_plain(chat, "⏳ 正在添加规则…")
+        run_bg(lambda: send_plain(chat, (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))); return
     if act == "del_rule":
-        ok, msg = del_rule(text); send_plain(chat, ("✅ " if ok else "") + msg); return
+        d = text
+        send_plain(chat, "⏳ 正在删除…")
+        run_bg(lambda: send_plain(chat, (lambda r: ("✅ " if r[0] else "") + r[1])(del_rule(d)))); return
     if act == "test_dom":
-        send_plain(chat, test_domain(text)); return
+        d = text
+        send_plain(chat, "⏳ 查询中…")
+        run_bg(lambda: send_plain(chat, test_domain(d))); return
     if act == "add_rs":
         p = text.split()
         if len(p) < 2:
             send_plain(chat, "格式: 规则集URL 出口 [名称]"); return
         send_plain(chat, "正在下载规则集…")
-        ok, msg = add_ruleset(p[0], p[1], " ".join(p[2:])); send_plain(chat, ("✅ " if ok else "") + msg); return
+        url, outb, label = p[0], p[1], " ".join(p[2:])
+        run_bg(lambda: send_plain(chat, (lambda r: ("✅ " if r[0] else "") + r[1])(add_ruleset(url, outb, label)))); return
     if act.startswith("rs_label:"):
         name = act.split(":", 1)[1]
-        ok, msg = set_ruleset_label(name, "" if text.strip() == "-" else text)
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        lab = "" if text.strip() == "-" else text
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(set_ruleset_label(name, lab)))); return
     if act == "ios_ssid":
         ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
         def _ios_ssid(ss=ssids):
@@ -2240,7 +2324,9 @@ def handle_text(chat, text):
         p = text.split()
         if len(p) < 2:
             send_plain(chat, "格式: remote|local 地址1 [地址2 …]"); return
-        ok, msg = set_mosdns_upstream(p[0].lower(), p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        kind, addrs = p[0].lower(), p[1:]
+        send_plain(chat, "⏳ 正在改 DNS 上游…")
+        run_bg(lambda: send_plain(chat, (lambda r: r[1] if r[0] else ("❌ " + r[1]))(set_mosdns_upstream(kind, addrs)))); return
     if act == "set_dot":
         send_plain(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…")
         def _sd(d=text):
@@ -2265,12 +2351,14 @@ def handle_document(chat, doc):
         send_plain(chat, "如要恢复配置: 先点菜单「♻️ 恢复」再发备份文件。"); return
     state.pop(chat, None)
     send_plain(chat, "正在校验并恢复…")
-    try:
-        data = tg_download(doc["file_id"])
-        ok, msg = restore_from(data)
-    except Exception as e:  # noqa: BLE001
-        ok, msg = False, f"恢复失败: {e}"
-    send_plain(chat, ("✅ " if ok else "❌ ") + msg)
+    def _restore(fid=doc["file_id"]):
+        try:
+            data = tg_download(fid)
+            ok, msg = restore_from(data)
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, f"恢复失败: {e}"
+        send_plain(chat, ("✅ " if ok else "❌ ") + msg)
+    run_bg(_restore)
 
 def main():
     if not TOKEN:
@@ -2281,7 +2369,7 @@ def main():
         {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
-    print("pdg-bot v3 started, allowed:", ALLOWED, flush=True)
+    print("pdg-bot v3.1 (5GPN-X async UX) started, allowed:", ALLOWED, flush=True)
     off = 0
     while True:
         r = post("getUpdates", {"offset": off, "timeout": 50})
@@ -2295,15 +2383,24 @@ def main():
                     if m["from"]["id"] not in ALLOWED:
                         continue
                     if "text" in m:
-                        handle_text(m["chat"]["id"], m["text"])
+                        handle_text(m["chat"]["id"], m["text"], m.get("message_id"))
                     elif "document" in m:
                         handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:
                     q = u["callback_query"]
-                    # 先停按钮转圈, 再跑可能较慢的 handle_cb(检查更新/测出口/自检等)。
+                    # 先停按钮转圈(专用池), 再跑 handle_cb; 慢操作内部 edit_bg/run_bg
+                    if q["from"]["id"] not in ALLOWED:
+                        answer_cb_async(q["id"], "⛔ 未授权", show_alert=True)
+                        continue
+                    chat_id = q["message"]["chat"]["id"]
+                    mid = q["message"]["message_id"]
+                    data = q.get("data") or ""
+                    # 对齐 5GPN-X: 同气泡慢操作未完成时只提示, 不重复入队
+                    if is_busy(chat_id, mid) and data not in ("menu", "status") and not data.startswith("nav:"):
+                        answer_cb_async(q["id"], "正在处理上一项操作，请稍候…")
+                        continue
                     answer_cb_async(q["id"])
-                    if q["from"]["id"] in ALLOWED:
-                        handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])
+                    handle_cb(chat_id, mid, data, q["id"])
             except Exception as e:  # noqa: BLE001
                 print("handle err", e, flush=True)
 

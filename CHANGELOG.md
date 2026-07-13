@@ -2,6 +2,22 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.2(对齐 5GPN-X: bot 异步 UX / 凭据消息删除)
+
+对照 [Xiuyixx/5GPN-X](https://github.com/Xiuyixx/5GPN-X) 的三项体验增强, 在 mihomo 架构下补齐:
+
+### Bot 响应速度(5GPN-X tgbot 思路)
+- 专用 callback 线程池 `answerCallbackQuery`; 慢操作期间同气泡再点提示「正在处理上一项」。
+- 加出口: **后台解析 + 自动删除含节点密码的消息**(删失败会提示手动删)。
+- 更多写配置路径异步: 删出口/默认出口/规则集/改规则出口/重启/更新 geosite/TFO/WDA/TG 出口/加规则/规则集/恢复备份等。
+
+### 安卓 Wi-Fi 私密 DNS
+- 维持 v1.2.0 的 **853 公网 DoT**(5GPN-X 同样公网 853); mosdns 仅内网段劫持。
+
+### iOS WhatsApp
+- 维持 TPROXY 适配方案: DNS **真实 IP**(非 5GPN-X 的 sniproxy+wa-shim 模型, 因本仓无 sniproxy)。
+- 扩充 `whatsapp.txt` 域名列表(g/v/mmg/pps/web/fna/cdn 等)。
+
 ## 2026-07-13 — v1.2.1(整理:文档对齐 mihomo + 上游同步策略)
 
 - **不 Sync fork**:文档明确与上游的关系与移植流程 → [docs/UPSTREAM.md](docs/UPSTREAM.md)。
