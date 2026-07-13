@@ -77,10 +77,14 @@ assert_near('if data == "tfo":', '"callback_data": "menu"', (
 ), window=900)
 
 callback_block = bot[bot.find('elif "callback_query" in u:'):]
-answer_pos = callback_block.find('answer_cb_async(q["id"])')
-handle_pos = callback_block.find('handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])')
+answer_pos = callback_block.find("answer_cb_async(q[\"id\"])")
+# 可能先 busy 提示再 continue, 正常路径仍会 answer 后 handle_cb(...)
+handle_pos = callback_block.find("handle_cb(chat_id, mid, data")
+if handle_pos < 0:
+    handle_pos = callback_block.find("handle_cb(")
 assert answer_pos >= 0 and handle_pos >= 0, "callback loop should answer and handle callback queries"
 assert answer_pos < handle_pos, "answerCallbackQuery should be sent before slow callback handling"
+assert "正在处理上一项操作" in callback_block, "busy callback should toast like 5GPN-X"
 
 
 # ── 动态回归: 返回主菜单/切子菜单必须清掉待输入状态和删除勾选 ──
