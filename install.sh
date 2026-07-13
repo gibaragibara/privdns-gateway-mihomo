@@ -207,6 +207,7 @@ c_g "铺设文件…"
 install -d /etc/mosdns/rules /etc/mihomo/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/parse-chinamax.py    /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
@@ -315,8 +316,8 @@ else
 fi
 
 # ── 7. geosite 规则库 (此时 DNS 仍可用) ──
-c_g "下载并解析 geosite 规则库…"
-bash /opt/pdg-bot/update-rules.sh || c_y "geosite 下载失败, 装好后可在 bot『更新规则库』重试"
+c_g "下载并解析 ChinaMax + geosite 规则库…"
+bash /opt/pdg-bot/update-rules.sh || c_y "规则库下载失败, 装好后可在 bot『更新规则库』重试"
 
 # ── 8. 启动 ──
 c_g "启动服务…"

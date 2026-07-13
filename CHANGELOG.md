@@ -2,6 +2,12 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.3(国内名单改用 blackmatrix7 ChinaMax)
+
+- 每日 `update-rules.sh` 拉取 [ChinaMax.list](https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Clash/ChinaMax) → `geosite_cn.txt`(mosdns 国内直连主名单)。
+- 新增 `parse-chinamax.py`; Loyalsoldier geosite 仍更新 apple / !cn, 不再覆盖 cn。
+- 原始 `ChinaMax.list` 落盘 `/etc/mosdns/rules/` 便于核对版本时间戳。
+
 ## 2026-07-13 — v1.2.2(对齐 5GPN-X: bot 异步 UX / 凭据消息删除)
 
 对照 [Xiuyixx/5GPN-X](https://github.com/Xiuyixx/5GPN-X) 的三项体验增强, 在 mihomo 架构下补齐:

@@ -43,7 +43,7 @@ sudo ./install.sh
    没抓到可手填。
 4. 填 **bot token / 你的 TG id / DoT 域名**。
 5. 确认 A 记录已生效后,脚本用 **certbot standalone** 签证书(此时会临时占用 80 口)。
-6. 下载 geosite、起服务、应用防火墙。
+6. 下载 **ChinaMax**(国内直连) + geosite 补充、起服务、应用防火墙。
 
 ## 3. 装完
 
@@ -143,3 +143,11 @@ sudo PDG_NONINTERACTIVE=1 \
 sudo ./uninstall.sh           # 停服务、删 systemd 单元(留配置/证书/二进制)
 sudo ./uninstall.sh --purge   # 连 /etc/mosdns /etc/mihomo /opt/pdg-bot 与二进制一起删
 ```
+
+## 国内直连名单 (ChinaMax)
+
+- 来源: [blackmatrix7/ios_rule_script …/Clash/ChinaMax](https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Clash/ChinaMax)
+- 写入: `/etc/mosdns/rules/geosite_cn.txt`(域名) + `ChinaMax.list`(原始) + `chinamax_ip.txt`(IPv4 CIDR 备份)
+- 更新: 每日 `pdg-rules-update.timer` 或 bot「更新规则库」/`bash /opt/pdg-bot/update-rules.sh`
+- 说明: 国内站在 **mosdns** 层返回真实 IP 直连, 不经 mihomo 劫持; 与 mihomo 出口规则是两层。
+

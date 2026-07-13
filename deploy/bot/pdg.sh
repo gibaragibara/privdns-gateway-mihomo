@@ -417,6 +417,7 @@ cmd_update(){
   c_g "刷新代码(配置/出口/token/证书均不动)…"
   install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py
   install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/parse-chinamax.py    /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
