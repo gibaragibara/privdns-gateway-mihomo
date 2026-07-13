@@ -70,9 +70,10 @@ sudo ./install.sh
      > 其它 mihomo 支持但 bot 还没解析的协议,可手写 `/etc/mihomo/state.json` 后执行 `sudo pdg restart`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
-   蜂窝双卡探测 `:81` 已自动配好。
-4. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
+3. iOS:bot **📱 客户端 → iOS 描述文件**(可填强制直连的 Wi-Fi SSID);**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
+   Wi-Fi/蜂窝均靠服务器 `:81` 探测判定是否启用 DoT(普通宽带 Wi-Fi 探不通则自动直连)。
+4. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
+5. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
 
@@ -101,7 +102,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 
 | 层 | 用什么 | 说明 |
 |---|---|---|
-| DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
+| DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853 公网)。WhatsApp 等无 SNI 域名返回真实 IP(配合 TPROXY) |
 | 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
 | 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
 | 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |

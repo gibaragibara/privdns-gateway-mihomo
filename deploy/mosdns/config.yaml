@@ -28,6 +28,10 @@ plugins:
   - tag: geosite_cn
     type: domain_set
     args: { files: ["/etc/mosdns/rules/geosite_cn.txt","/etc/mosdns/rules/geosite_apple.txt","/etc/mosdns/rules/custom_direct.txt"] }
+  # iOS WhatsApp 等无 SNI 协议: 返回真实 IP, 由 TPROXY 按目的地址转发(见 deploy/mosdns/rules/whatsapp.txt)
+  - tag: geosite_wa
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/whatsapp.txt"] }
   - tag: npn_clients
     type: ip_set
     args: { ips: ["__INTERNAL_CIDR__"] }
@@ -60,6 +64,12 @@ plugins:
         exec: reject 0
       - matches: qtype 65
         exec: reject 0
+      - exec: jump has_resp
+      # WhatsApp 等无 SNI: 返回真实 A, 再 has_resp 跳过 black_hole
+      - matches: qname $geosite_wa
+        exec: $ecs_neutral
+      - matches: qname $geosite_wa
+        exec: $remote_upstream
       - exec: jump has_resp
       - matches: qtype 1
         exec: black_hole __SERVER_IP__

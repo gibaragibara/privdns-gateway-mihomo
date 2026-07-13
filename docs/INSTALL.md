@@ -91,11 +91,12 @@ sudo PDG_NONINTERACTIVE=1 \
 | 端口 | 协议 | 开放范围 | 用途 |
 |---|---|---|---|
 | 22 | tcp | 全网 | SSH 管理 |
-| 853 | tcp | 仅内网卡段 | **DoT — 手机私密 DNS 入口(核心)** |
+| 853 | tcp | **公网** | **DoT — 手机私密 DNS 入口(核心)**; 公网放行以便 Android 在 Wi-Fi 下私密 DNS 可用(mosdns 只对内网段劫持 A 记录) |
 | 443 | tcp+udp | 仅内网卡段 | **mihomo TPROXY 数据入口(嗅 SNI / QUIC)** |
 | 80 | tcp | 仅内网卡段 | mihomo TPROXY HTTP 入口(嗅 Host) |
 | 53 | tcp+udp | 仅内网卡段 | 明文 DNS |
-| 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点 |
+| 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点(Wi-Fi/蜂窝均用 :81 判定是否启用 DoT) |
+| 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk); mihomo TPROXY 已覆盖, 放行便于诊断/兼容 |
 | 9090 | tcp | 仅 127.0.0.1 | mihomo external-controller(bot 用,不对外) |
 | 8443 | tcp | 临时·仅内网卡 | `pdg ios` 下发描述文件时短开,用完自动关 |
 

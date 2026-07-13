@@ -109,23 +109,54 @@ def check_internal_cidr():
 
 def check_nft():
     # 兼容两种表名: 新版独立表 inet pdg; 旧装(尚未迁移)仍是 inet filter。
+    # 853 故意对公网开放(Android 私密 DNS 在 Wi-Fi 下源 IP 不是内网段), 不算泄露。
     _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
     if not out:
         _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
     if not out:
         return ("warn", "防火墙", "读不到 nftables")
     leaked = set()
+    sens = {"53", "80", "81", "443", "5228", "5229", "5230", "8445"}  # 不含 853
     for ln in out.splitlines():
         s = ln.strip()
         if "saddr" in s or "accept" not in s:
             continue  # 限定来源的行 / 非 accept 行, 跳过
-        m = re.search(r"dport\s*\{?\s*([0-9,\s]+)", s)
+        m = re.search(r"dport\s*\{?\s*([0-9,\-\s]+)", s)  # 端口集可含区间(如 5228-5230)
         if m:
-            ports = {p.strip() for p in m.group(1).split(",") if p.strip().isdigit()}
-            leaked |= ports & {"53", "80", "81", "443", "853", "8445"}
+            for tok in m.group(1).split(","):
+                tok = tok.strip()
+                if tok.isdigit() and tok in sens:
+                    leaked.add(tok)
+                elif re.match(r"^\d+-\d+$", tok):
+                    a, b = (int(x) for x in tok.split("-"))
+                    leaked |= {p for p in sens if a <= int(p) <= b}
+        # 单端口写法: tcp dport 80 accept
+        m2 = re.search(r"dport\s+(\d+)\s+accept", s)
+        if m2 and m2.group(1) in sens:
+            leaked.add(m2.group(1))
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853/8445 仅限内网卡来源")
+    return ("ok", "防火墙", "53/80/81/443/5228-5230/8445 仅限内网; 853 DoT 公网可达(安卓 Wi-Fi)")
+
+def check_gms():
+    """GMS/FCM 推送: mihomo TPROXY 已透明接管全部端口, 只需防火墙不把 5228-5230
+    对非 TPROXY 路径误伤即可。mihomo 版以「input 链放行内网→5228 或 TPROXY 全端口」为 ok。"""
+    _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
+    if not out:
+        _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
+    if not out:
+        try:
+            out = open("/etc/nftables.conf").read()
+        except OSError:
+            out = ""
+    fw_ok = any("5228" in ln and "accept" in ln for ln in out.splitlines())
+    # TPROXY 全端口接管时, prerouting 已有 tproxy, 也算可用
+    _, pr, _ = _run(["nft", "list", "chain", "inet", "pdg", "prerouting"])
+    tproxy_ok = "tproxy" in (pr or "")
+    if fw_ok or tproxy_ok:
+        return ("ok", "GMS 推送", "GMS/FCM 经 TPROXY/放行可用(5228-5230)")
+    return ("warn", "GMS 推送", "未检测到 5228-5230 放行或 TPROXY; 运行 sudo pdg restart 触发迁移。"
+                                "若自定义防火墙, 请放行内网卡段 → 5228-5230/tcp 或依赖 TPROXY。")
 
 def check_cert():
     p = _cert_path()
@@ -290,7 +321,7 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_cert, check_dns, check_mihomo_config]
+       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加

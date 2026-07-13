@@ -1,0 +1,18 @@
+# WhatsApp / related — 返回真实 A 记录(不劫持到网关)。
+# iOS WhatsApp 用 ED/WA Noise 无 SNI; 若 A 被 black_hole 到本机, mihomo 嗅探不到目的域名会失败。
+# TPROXY 保留真实目的 IP 后可正常出站。格式: mosdns domain_set。
+domain:whatsapp.com
+domain:whatsapp.net
+domain:whatsapp.biz
+domain:whatsapp-cdn.net
+domain:wa.me
+domain:wa.works
+domain:cdn.whatsapp.net
+full:g.whatsapp.net
+full:v.whatsapp.net
+full:mmg.whatsapp.net
+full:mmx-ds.cdn.whatsapp.net
+full:media.fsb1-1.fna.whatsapp.net
+domain:facebook.com
+domain:fbcdn.net
+domain:tfbnw.net

@@ -77,3 +77,23 @@ answer_pos = callback_block.find('answer_cb_async(q["id"])')
 handle_pos = callback_block.find('handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])')
 assert answer_pos >= 0 and handle_pos >= 0, "callback loop should answer and handle callback queries"
 assert answer_pos < handle_pos, "answerCallbackQuery should be sent before slow callback handling"
+
+
+# ── 动态回归: 返回主菜单/切子菜单必须清掉待输入状态和删除勾选 ──
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("pdg_bot", ROOT / "deploy/bot/pdg-bot.py")
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+
+mod.edit = lambda chat, mid, text, kb=None: None
+mod.status_text = lambda: "s"
+mod._dot_host = lambda: "dot.test"
+
+for data in ("menu", "status", "nav:client", "nav:exit", "nav:rule", "nav:ops"):
+    mod.state[1] = "ios_ssid"
+    mod.del_sel[1] = {"x.com"}
+    mod.handle_cb(1, 9, data)
+    assert 1 not in mod.state, f"{data} 后待输入状态应被清掉"
+    assert 1 not in mod.del_sel, f"{data} 后删除勾选应被清掉"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PrivDNS Gateway — Telegram 管理 bot v3 (纯标准库, long-poll)。
 
-出口  : 列表 / 添加(ss/vmess/trojan/vless 链接) / 删除 / 设默认出口 / 故障切换组(urltest)
+出口  : 列表 / 添加(ss/vmess/trojan/vless 链接) / 删除 / 改名(级联更新引用) / 设默认出口 / 故障切换组(urltest)
 分流  : 规则列表 / 添加(域名→出口|direct) / 删除 / 添加规则集(Surge .list URL→出口) / 删除规则集
 诊断  : 状态 / 端到端测出口延迟(clash_api) / 流量统计(clash_api)
 运维  : 重启 / 更新规则库(geosite + 规则集) / iOS 描述文件下发 / 配置备份·恢复
@@ -11,7 +11,8 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, hashlib, http.client, io, json, os, re, shutil, socket, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, tarfile, tempfile, threading, time, uuid
+from concurrent.futures import ThreadPoolExecutor
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
 
@@ -112,7 +113,8 @@ def _nav(key):
         "exit": ("📤 <b>出口管理</b> — 选一项:", [
             [{"text": "📋 列表", "callback_data": "exit_list"}, {"text": "➕ 添加", "callback_data": "add_exit"},
              {"text": "🗑 删除", "callback_data": "del_exit"}],
-            [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "↕️ 出口排序", "callback_data": "order_exit"}],
+            [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "↕️ 出口排序", "callback_data": "order_exit"},
+             {"text": "✏️ 改名", "callback_data": "ren_exit"}],
             [{"text": "🔀 新建故障组", "callback_data": "add_grp"}, {"text": "✏️ 改故障组", "callback_data": "edit_grp"}]]),
         "rule": ("📑 <b>分流管理</b> — 选一项:", [
             [{"text": "📋 规则", "callback_data": "rules"}, {"text": "➕ 加规则", "callback_data": "add_rule"},
@@ -170,6 +172,48 @@ def answer_cb_async(cb_id):
         except Exception:  # noqa: BLE001
             pass
     threading.Thread(target=go, daemon=True).start()
+
+# 慢操作后台跑, 主 long-poll 不堵: 测出口/自检/加出口/签证书等
+_BG = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pdg-bg")
+_BUSY = set()
+_BUSY_LOCK = threading.Lock()
+
+def run_bg(fn, *args, **kwargs):
+    def go():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            print("bg err", e, flush=True)
+    _BG.submit(go)
+
+def edit_bg(chat, mid, text_fn, kb=None, busy_key=None):
+    """先立刻回主循环, 后台算 text_fn() 再 edit。同一消息未完成前点第二次直接忽略。"""
+    key = busy_key or (chat, mid)
+    with _BUSY_LOCK:
+        if key in _BUSY:
+            return False
+        _BUSY.add(key)
+    def go():
+        try:
+            text = text_fn() if callable(text_fn) else text_fn
+            edit(chat, mid, text, kb)
+        finally:
+            with _BUSY_LOCK:
+                _BUSY.discard(key)
+    _BG.submit(go)
+    return True
+
+def send_bg(chat, text_fn, kb=None):
+    def go():
+        try:
+            text = text_fn() if callable(text_fn) else text_fn
+            if kb is None:
+                send_plain(chat, text)
+            else:
+                send(chat, text, kb)
+        except Exception as e:  # noqa: BLE001
+            print("send_bg err", e, flush=True)
+    _BG.submit(go)
 
 def sh(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
@@ -1408,6 +1452,44 @@ def reorder_exits(order):
     ok, msg = apply_sb(mod)
     return ok, (f"✅ 出口顺序已更新: {' › '.join(order)}" if ok else msg)
 
+
+def rename_exit(old, new):
+    """真改名: 改 outbound 的 tag, 并级联更新全部引用 —— 分流规则(含 TG 出口规则)、
+    故障组成员、route.final、规则集元数据的 outbound 记录。direct(模板锚点, WDA 依赖其 tag)不可改。"""
+    c = load()
+    if old not in deletable_tags(c):
+        return False, f"出口 {old} 不存在或不可改名(direct 出口是模板锚点)"
+    new = _tag(new.strip(), "", "")
+    if not re.search(r"[A-Za-z0-9]", new):
+        return False, "新名字无效: 用字母/数字/_/./-(不支持中文), 40 字内"
+    if new == old:
+        return False, "新旧名字相同, 未改动"
+    if new in ("direct", "直连", "block", "dns-out", "jp"):
+        return False, f"{new} 是保留字, 换个名字"
+    if new in [o["tag"] for o in c["outbounds"]]:
+        return False, f"名字 {new} 已被占用"
+    def mod(cc):
+        for o in cc["outbounds"]:
+            if o.get("tag") == old:
+                o["tag"] = new
+            if o.get("type") == "urltest":
+                o["outbounds"] = [new if m == old else m for m in o.get("outbounds", [])]
+        for r in cc["route"]["rules"]:
+            if r.get("outbound") == old:
+                r["outbound"] = new
+        if cc["route"].get("final") == old:
+            cc["route"]["final"] = new
+    ok, msg = apply_sb(mod)
+    if not ok:
+        return False, msg
+    m = _rs_meta(); dirty = False
+    for info in m.values():
+        if info.get("outbound") == old:
+            info["outbound"] = new; dirty = True
+    if dirty:
+        _save_rs_meta(m)
+    return True, f"✅ 出口 <b>{old}</b> 已改名 <b>{new}</b>, 分流规则/故障组/默认出口里的引用已同步。"
+
 def urltest_groups(c):
     return [o["tag"] for o in c["outbounds"] if o.get("type") == "urltest"]
 
@@ -1552,14 +1634,22 @@ def set_dot_domain(domain):
                   "• iOS: 重新生成一次「📱 iOS 描述文件」即可(自动用新域名)")
 
 # ── iOS 描述文件 ──
-def _ios_profile():
+def _ios_profile(ssids=()):
+    """ssids 非空时在 OnDemandRules 最前插一条「命中这些 SSID 的 Wi-Fi 强制直连(不启用 DoT)」;
+    其余 Wi-Fi/蜂窝仍按模板里的 :81 探测判定。用 plistlib 插入, SSID 含 &<> 等也不会破 XML。"""
     if not os.path.exists(IOS_TMPL):
         raise FileNotFoundError("缺少模板 " + IOS_TMPL)
     t = open(IOS_TMPL).read()
-    return (t.replace("__DOT_HOST__", _dot_host())
-             .replace("__JP_IP__", _server_ip())
-             .replace("__UUID1__", str(uuid.uuid4()).upper())
-             .replace("__UUID2__", str(uuid.uuid4()).upper())).encode()
+    raw = (t.replace("__DOT_HOST__", _dot_host())
+            .replace("__JP_IP__", _server_ip())
+            .replace("__UUID1__", str(uuid.uuid4()).upper())
+            .replace("__UUID2__", str(uuid.uuid4()).upper())).encode()
+    if not ssids:
+        return raw
+    p = plistlib.loads(raw)
+    p["PayloadContent"][0]["OnDemandRules"].insert(
+        0, {"InterfaceTypeMatch": "WiFi", "SSIDMatch": list(ssids), "Action": "Disconnect"})
+    return plistlib.dumps(p)
 
 # ── 配置备份 / 恢复 ──
 BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
@@ -1776,6 +1866,8 @@ def kb_pick_named(prefix, items, back=BACK):
 
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
+    if data in ("menu", "status") or data.startswith("nav:"):
+        state.pop(chat, None); del_sel.pop(chat, None)   # 返回/切页 = 放弃进行中的输入流程和勾选
     if data in ("menu", "status"):
         edit(chat, mid, status_text(), MENU); return
     if data.startswith("nav:"):
@@ -1788,17 +1880,24 @@ def handle_cb(chat, mid, data):
     if data.startswith("dosetdot:"):
         domain = data[9:]
         edit(chat, mid, f"正在为 <code>{domain}</code> 校验 A 记录并签证书(约 30-60 秒, 代理短暂中断)…", BACK)
-        ok, msg = set_dot_domain(domain); edit(chat, mid, (msg if ok else "❌ " + msg), MENU); return
+        def _do():
+            ok, msg = set_dot_domain(domain)
+            edit(chat, mid, (msg if ok else "❌ " + msg), MENU)
+        run_bg(_do); return
     if data == "test":
-        edit(chat, mid, "测试中…", BACK); edit(chat, mid, test_exits(), BACK); return
+        edit(chat, mid, "测试中…", BACK)
+        edit_bg(chat, mid, test_exits, BACK); return
     if data == "doctor":
-        edit(chat, mid, "🩺 自检中(几秒)…", BACK); edit(chat, mid, doctor_text(), BACK); return
+        edit(chat, mid, "🩺 自检中(几秒)…", BACK)
+        edit_bg(chat, mid, doctor_text, BACK); return
     if data == "upd_check":
         edit(chat, mid, "🔄 检查更新中…", BACK)
-        has, txt = update_check()
-        kb = ({"inline_keyboard": [[{"text": "✅ 确认更新", "callback_data": "upd_apply"}],
-                                   [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]} if has else BACK)
-        edit(chat, mid, txt, kb); return
+        def _upd():
+            has, txt = update_check()
+            kb = ({"inline_keyboard": [[{"text": "✅ 确认更新", "callback_data": "upd_apply"}],
+                                       [{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]} if has else BACK)
+            edit(chat, mid, txt, kb)
+        run_bg(_upd); return
     if data == "upd_apply":
         ok = start_update()
         edit(chat, mid, ("🚀 已开始后台更新, 约 30-60 秒后 bot 自动回来(期间可能短暂无响应)。\n"
@@ -1911,29 +2010,49 @@ def handle_cb(chat, mid, data):
         tags = deletable_tags(load())
         edit(chat, mid, "选择要删除的出口/故障组：" if tags else "没有可删的出口",
              kb_pick("delx", tags, EXIT_BACK) if tags else EXIT_BACK); return
+    if data == "ren_exit":
+        tags = deletable_tags(load())
+        edit(chat, mid, "选择要改名的出口/故障组：" if tags else "没有可改名的出口",
+             kb_pick("renx", tags, EXIT_BACK) if tags else EXIT_BACK); return
+    if data.startswith("renx:"):
+        old = data[5:]; state[chat] = "rename_exit:" + old
+        edit(chat, mid, f"发出口 <b>{old}</b> 的新名字(字母/数字/_/./-, 40 字内)。\n"
+             "分流规则、故障组、默认出口里的引用会一并同步。/cancel 取消。", EXIT_BACK); return
     if data == "setfinal":
         edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()), EXIT_BACK)); return
     if data == "ios":
+        state[chat] = "ios_ssid"
+        edit(chat, mid, "📱 <b>生成 iOS 描述文件</b>\n"
+             "Wi-Fi/蜂窝下是否启用私密 DNS 都由 <code>:81</code> 探测自动判定(网络能走到网关才启用)。\n"
+             "若有想<b>强制直连</b>的 Wi-Fi(如公司网、探测误判的酒店网), 发它的名字(SSID, 多个则每行一个)再生成;"
+             "不需要就点「直接生成」。/cancel 取消。",
+             {"inline_keyboard": [[{"text": "⏭ 直接生成", "callback_data": "iosgen"}],
+                                  [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
+    if data == "iosgen":
+        state.pop(chat, None)
         edit(chat, mid, "正在生成 iOS 描述文件…", BACK)
-        try:
-            send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(),
-                          f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
-                          "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。\n"
-                          "蜂窝下靠服务器 :81 探测激活, 安装时已自动配好。")
-            edit(chat, mid, "✅ 描述文件已发送(见上一条)。", MENU)
-        except Exception as e:  # noqa: BLE001
-            edit(chat, mid, f"生成失败: {e}", MENU)
-        return
+        def _ios():
+            try:
+                send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(),
+                              f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
+                              "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。\n"
+                              "Wi-Fi/蜂窝均靠服务器 :81 探测激活, 安装时已自动配好。")
+                edit(chat, mid, "✅ 描述文件已发送(见上一条)。", MENU)
+            except Exception as e:  # noqa: BLE001
+                edit(chat, mid, f"生成失败: {e}", MENU)
+        run_bg(_ios); return
     if data == "backup":
         edit(chat, mid, "正在打包配置…", OPS_BACK)
-        try:
-            fn = "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz"
-            send_document(chat, fn, backup_blob(),
-                          "💾 配置备份(含 mihomo 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
-            edit(chat, mid, "✅ 备份已发送(见上一条)。", MENU)
-        except Exception as e:  # noqa: BLE001
-            edit(chat, mid, f"备份失败: {e}", MENU)
-        return
+        def _bak():
+            try:
+                fn = "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz"
+                send_document(chat, fn, backup_blob(),
+                              "💾 配置备份(含 mihomo 出口密码, 请妥善保存)。\n恢复: 点「♻️ 恢复」后把此文件发回。")
+                edit(chat, mid, "✅ 备份已发送(见上一条)。", MENU)
+            except Exception as e:  # noqa: BLE001
+                edit(chat, mid, f"备份失败: {e}", MENU)
+        run_bg(_bak); return
     if data == "restore":
         state[chat] = "restore"
         edit(chat, mid, "把之前「💾 备份」得到的 <code>.tar.gz</code> 作为文件发给我即可恢复"
@@ -2010,9 +2129,9 @@ def handle_text(chat, text):
     if text.startswith("/"):
         cmd = text.split()[0]
         if cmd == "/test":
-            send_plain(chat, "测试中…"); send_plain(chat, test_exits()); return
+            send_plain(chat, "测试中…"); send_bg(chat, test_exits); return
         if cmd == "/doctor":
-            send_plain(chat, "🩺 自检中…"); send(chat, doctor_text(), BACK); return
+            send_plain(chat, "🩺 自检中…"); send_bg(chat, doctor_text, BACK); return
         if cmd == "/traffic":
             send(chat, traffic_text(), BACK); return
         if cmd == "/exits":
@@ -2061,16 +2180,19 @@ def handle_text(chat, text):
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.pop(chat, None) or ""   # 无待输入时为 "", 避免下面 act.startswith(...) 在 None 上崩
     if act == "add_exit":
-        try:
-            ob = parse_link(text)
-            def mod(c):
-                c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != ob["tag"]]
-                c["outbounds"].append(ob)
-            ok, msg = apply_sb(mod)
-            send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
-        except Exception as e:  # noqa: BLE001
-            send_plain(chat, f"解析失败: {e}")
-        return
+        # 粘贴凭证后立刻 ACK, 解析/校验/重启 mihomo 后台做, 避免 bot 卡顿
+        send_plain(chat, "⏳ 正在解析并写入出口…")
+        def _add(link=text):
+            try:
+                ob = parse_link(link)
+                def mod(c):
+                    c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != ob["tag"]]
+                    c["outbounds"].append(ob)
+                ok, msg = apply_sb(mod)
+                send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
+            except Exception as e:  # noqa: BLE001
+                send_plain(chat, f"解析失败: {e}")
+        run_bg(_add); return
     if act == "add_group":
         p = text.split()
         if len(p) < 3:
@@ -2080,6 +2202,9 @@ def handle_text(chat, text):
         ok, msg = reorder_exits(text.replace(",", " ").split()); send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act.startswith("edit_grp:"):
         ok, msg = add_group(act.split(":", 1)[1], text.replace(",", " ").split())
+        send_plain(chat, msg if ok else ("❌ " + msg)); return
+    if act.startswith("rename_exit:"):
+        ok, msg = rename_exit(act.split(":", 1)[1], text)
         send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "add_rule":
         p = text.split()
@@ -2099,6 +2224,18 @@ def handle_text(chat, text):
         name = act.split(":", 1)[1]
         ok, msg = set_ruleset_label(name, "" if text.strip() == "-" else text)
         send_plain(chat, msg if ok else ("❌ " + msg)); return
+    if act == "ios_ssid":
+        ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
+        def _ios_ssid(ss=ssids):
+            try:
+                send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(ss),
+                              f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
+                              + (("强制直连 Wi-Fi: " + ", ".join(ss) + "\n") if ss else "")
+                              + "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。")
+                send_plain(chat, "✅ 已生成" + (f", {len(ss)} 个 Wi-Fi 设为强制直连" if ss else ""))
+            except Exception as e:  # noqa: BLE001
+                send_plain(chat, f"生成失败: {e}")
+        run_bg(_ios_ssid); return
     if act == "set_dns":
         p = text.split()
         if len(p) < 2:
@@ -2106,7 +2243,10 @@ def handle_text(chat, text):
         ok, msg = set_mosdns_upstream(p[0].lower(), p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
     if act == "set_dot":
         send_plain(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…")
-        ok, msg = set_dot_domain(text); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        def _sd(d=text):
+            ok, msg = set_dot_domain(d)
+            send_plain(chat, msg if ok else ("❌ " + msg))
+        run_bg(_sd); return
     if act == "restore":
         send_plain(chat, "请把备份 <code>.tar.gz</code> 作为「文件」发来, 而不是文字。/cancel 取消。"); state[chat] = "restore"; return
     # 裸发一个像域名的文本: 当作想设 DoT 域名, 给一键按钮 (省得先点菜单进状态)

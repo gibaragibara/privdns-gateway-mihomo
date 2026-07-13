@@ -241,6 +241,114 @@ PY
   fi
 }
 
+# 老装迁移: 防火墙 853 对公网放行(安卓 Wi-Fi 私密 DNS) + 内网放行 5228-5230(GMS)。幂等。
+# shellcheck disable=SC2120
+migrate_fw_android_dot_gms(){
+  local f="${1:-/etc/nftables.conf}"
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0
+  if grep -qE 'tcp dport 853 accept' "$f" && grep -qE '5228' "$f"; then
+    return 0
+  fi
+  c_g "检测到防火墙需补 853 公网 DoT / GMS 5228-5230 → 迁移…"
+  local bak; bak="$f.preadot.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "  备份失败, 中止。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  python3 - "$f" <<'PY'
+import re, sys
+path = sys.argv[1]
+t = open(path).read()
+
+def fix_portset(m):
+    prefix, body, suffix = m.group(1), m.group(2), m.group(3)
+    parts = [p.strip() for p in body.split(",") if p.strip() and p.strip() != "853"]
+    if not any(p.startswith("5228") for p in parts):
+        if "8445" in parts:
+            parts.insert(parts.index("8445"), "5228-5230")
+        else:
+            parts.append("5228-5230")
+    return prefix + ", ".join(parts) + suffix
+
+t = re.sub(
+    r"(ip saddr [0-9./]+ tcp dport \{\s*)([^}]+?)(\s*\} accept)",
+    fix_portset, t, count=1)
+if "tcp dport 853 accept" not in t:
+    t = re.sub(r"(tcp dport \d+ accept\n)", r"\1        tcp dport 853 accept\n", t, count=1)
+open(path, "w").write(t)
+PY
+  if ! nft -c -f "$f" >/dev/null 2>&1; then
+    c_y "  nft -c 未过 → 还原。"; cp -a "$bak" "$f"; return 0
+  fi
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ 防火墙已补 853 公网 DoT / GMS 端口(若适用)。"
+  else
+    c_y "  加载失败 → 还原。"; cp -a "$bak" "$f"
+  fi
+}
+
+migrate_mosdns_whatsapp(){
+  local conf="${1:-/etc/mosdns/config.yaml}"
+  local rules="${2:-/etc/mosdns/rules}"
+  local repo="${REPO_DIR:-/opt/privdns-gateway}"
+  [[ -f "$conf" ]] || return 0
+  mkdir -p "$rules"
+  if [[ ! -f "$rules/whatsapp.txt" ]]; then
+    if [[ -f "$repo/deploy/mosdns/rules/whatsapp.txt" ]]; then
+      install -m644 "$repo/deploy/mosdns/rules/whatsapp.txt" "$rules/whatsapp.txt"
+    else
+      printf '%s\n' 'domain:whatsapp.com' 'domain:whatsapp.net' 'domain:whatsapp.biz' \
+        'domain:wa.me' 'full:g.whatsapp.net' 'full:v.whatsapp.net' > "$rules/whatsapp.txt"
+    fi
+    c_g "已写入 $rules/whatsapp.txt"
+  fi
+  grep -q 'geosite_wa' "$conf" && return 0
+  grep -q 'black_hole' "$conf" || return 0
+  c_g "检测到 mosdns 缺 WhatsApp 真实 IP 分支 → 补 geosite_wa…"
+  local bak; bak="$conf.prewa.$(date +%s)"
+  cp -a "$conf" "$bak" || return 0
+  if ! python3 - "$conf" <<'PY'
+import sys
+p = sys.argv[1]
+t = open(p).read()
+if "geosite_wa" in t:
+    raise SystemExit(0)
+plugin = '''  - tag: geosite_wa
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/whatsapp.txt"] }
+'''
+j = t.find("  - tag: npn_clients")
+if j < 0:
+    j = t.find("  - tag: ecs_china")
+if j < 0:
+    raise SystemExit("no insert point")
+t = t[:j] + plugin + t[j:]
+wa_branch = '''      - matches: qname $geosite_wa
+        exec: $ecs_neutral
+      - matches: qname $geosite_wa
+        exec: $remote_upstream
+      - exec: jump has_resp
+'''
+bh = "      - matches: qtype 1\n        exec: black_hole"
+if "geosite_wa" in t and "qname $geosite_wa" not in t.split("black_hole")[0][-500:]:
+    if bh not in t:
+        raise SystemExit("black_hole not found")
+    t = t.replace(bh, wa_branch + bh, 1)
+open(p, "w").write(t)
+PY
+  then
+    c_y "  改写失败 → 还原。"; cp -a "$bak" "$conf"; return 0
+  fi
+  systemctl restart mosdns 2>/dev/null || true
+  sleep 1
+  if [[ "$(systemctl is-active mosdns 2>/dev/null)" == active ]]; then
+    c_g "  ✅ mosdns WhatsApp 真实 IP 分支已启用。"
+  else
+    c_y "  mosdns 未起来 → 还原。"; cp -a "$bak" "$conf"
+    systemctl restart mosdns 2>/dev/null || true
+  fi
+}
+
 SNAP_DIR="/var/lib/privdns-gateway/backups"
 
 cmd_snapshot(){
@@ -319,6 +427,7 @@ cmd_update(){
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+  install -m644 "$REPO_DIR"/deploy/mosdns/rules/whatsapp.txt /etc/mosdns/rules/whatsapp.txt 2>/dev/null || true
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
@@ -328,6 +437,8 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
+  migrate_fw_android_dot_gms  # 老装: 853 公网 DoT(安卓 Wi-Fi) + GMS 5228-5230
+  migrate_mosdns_whatsapp     # 老装: WhatsApp 无 SNI 返回真实 IP
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
@@ -501,7 +612,8 @@ menu(){
 if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
-    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true ;;   # 管理类命令才迁移
+    *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
+       migrate_fw_android_dot_gms || true; migrate_mosdns_whatsapp || true ;;   # 管理类命令才迁移
   esac
 fi
 

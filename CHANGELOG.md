@@ -2,6 +2,30 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-13 — v1.2.0-mihomo(同步上游 + bot 加速 + 安卓 Wi-Fi DoT + iOS WhatsApp)
+
+整合自上游 [misaka-cpu/privdns-gateway](https://github.com/misaka-cpu/privdns-gateway) 与 5GPN-X 思路,适配 **mihomo TPROXY** 版:
+
+### Bot 响应速度
+- 慢操作(测出口 / 自检 / 检查更新 / 签证书 / 加出口 / 备份 / iOS 描述文件)改后台线程执行,主 long-poll 不再卡住。
+- 粘贴节点链接后立刻回「正在解析…」,`mihomo -t`+重启在后台完成。
+- 返回主菜单 / 切子菜单时清空待输入状态与删规则勾选(修「下一条文字被旧流程误吃」)。
+- 出口真**改名**:级联更新规则 / 故障组 / final / TG / 规则集元数据。
+
+### 安卓 Wi-Fi 私密 DNS「无法访问」
+- 防火墙 **853 DoT 对公网放行**;mosdns 仍只对内网卡段做 A 劫持。
+- 手机在普通 Wi-Fi 下私密 DNS 可连上网关(拿真实解析、不劫持),不再整网 DNS 不可用。
+- 老装 `pdg update` / 管理类命令幂等迁移 `migrate_fw_android_dot_gms`。
+
+### iOS Wi-Fi / WhatsApp
+- iOS 描述文件:Wi-Fi 改为与蜂窝一致的 **:81 探测**判定;bot 可填 SSID 强制直连名单。
+- **WhatsApp 无 SNI**:`whatsapp.txt` + mosdns `geosite_wa` 返回真实 A,TPROXY 按目的 IP 出站(不再 black_hole 到本机导致嗅探失败)。
+- GMS/FCM `5228-5230` 内网放行 + doctor 自检(TPROXY 全端口已覆盖数据面)。
+
+### 其它
+- CI 改校验 mihomo 模板;回归用例:iOS SSID / 出口改名 / doctor 防火墙 / bot 清状态。
+- 老装迁移:`migrate_mosdns_whatsapp`、`migrate_fw_android_dot_gms`。
+
 ## 2026-06-27 — v1.1.10(删规则集结果显示名 + 清死代码)
 
 - **修**:删除规则集后的「已删除规则集 rs_xxxx」**没用改过的显示名**;`del_ruleset` 现在删前取 `label` 用于结果消息(回归断言加进 `test-domain-label.py`)。
