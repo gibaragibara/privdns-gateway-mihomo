@@ -6,6 +6,20 @@
       "latitude": 22.303611,
       "longitude": 114.165,
       "accuracy": 25
+    },
+    {
+      "id": "p002",
+      "name": "东京涩谷站",
+      "latitude": 35.658514,
+      "longitude": 139.70133,
+      "accuracy": 25
+    },
+    {
+      "id": "p003",
+      "name": "日本横滨站",
+      "latitude": 35.46583,
+      "longitude": 139.62278,
+      "accuracy": 25
     }
   ]
 }
