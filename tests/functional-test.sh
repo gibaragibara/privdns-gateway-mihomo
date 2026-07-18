@@ -42,7 +42,14 @@ note "用 mihomo: $MIHOMO ($("$MIHOMO" -v 2>/dev/null | head -1))"
 
 python3 "$HERE/mock_socks.py" 19081 "$WORK/a.log" >"$WORK/a.out" 2>&1 & PIDS+=($!)
 python3 "$HERE/mock_socks.py" 19082 "$WORK/b.log" >"$WORK/b.out" 2>&1 & PIDS+=($!)
-sleep 0.3
+for port in 19081 19082; do
+  ready=0
+  for _ in $(seq 1 50); do
+    if (echo > "/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then ready=1; break; fi
+    sleep 0.1
+  done
+  [[ "$ready" == 1 ]] || fail "mock SOCKS :$port 未就绪"
+done
 
 cat > "$WORK/config.yaml" <<'YAML'
 mixed-port: 18443
@@ -90,7 +97,10 @@ PY
 
 connect_host foo.ai.example
 connect_host cdn.media.example
-sleep 0.5
+for _ in $(seq 1 30); do
+  [[ -f "$WORK/a.log" && -f "$WORK/b.log" ]] && break
+  sleep 0.1
+done
 
 grep -q 'foo.ai.example:443' "$WORK/a.log" || { cat "$WORK/mihomo.out" >&2; fail "ai.example 未走出口 a"; }
 grep -q 'cdn.media.example:443' "$WORK/b.log" || { cat "$WORK/mihomo.out" >&2; fail "media.example 未走出口 b"; }
