@@ -1,0 +1,31 @@
+[Unit]
+Description=PrivDNS Gateway scoped WLOC MITM sidecar
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/pdg-bot/wloc_mitm.py
+
+[Service]
+Type=simple
+User=pdg-wloc
+Group=pdg-wloc
+Environment=HOME=/var/lib/pdg-wloc
+WorkingDirectory=/var/lib/pdg-wloc
+ExecStart=/usr/bin/mitmdump --mode regular --listen-host 127.0.0.1 --listen-port 9080 --set confdir=/var/lib/pdg-wloc/mitmproxy --set connection_strategy=lazy --set block_global=false --scripts /opt/pdg-bot/wloc_mitm.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/pdg-wloc
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

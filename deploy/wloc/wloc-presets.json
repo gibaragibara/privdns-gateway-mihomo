@@ -1,0 +1,11 @@
+{
+  "presets": [
+    {
+      "id": "p001",
+      "name": "香港西九龙站",
+      "latitude": 22.303611,
+      "longitude": 114.165,
+      "accuracy": 25
+    }
+  ]
+}

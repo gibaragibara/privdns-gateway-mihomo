@@ -11,7 +11,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, hashlib, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
@@ -31,8 +31,17 @@ CERT_DIR = os.path.dirname(CERT)
 CLASH = "http://127.0.0.1:9090"
 DELAY_URL = "http://www.gstatic.com/generate_204"
 API = "https://api.telegram.org/bot" + TOKEN
+WLOC_STATE = "/var/lib/pdg-wloc/wloc.json"
+WLOC_DOMAINS = "/etc/mosdns/rules/wloc.txt"
+WLOC_CA = "/var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer"
+WLOC_PRESETS = "/etc/privdns-gateway/wloc-presets.json"
+WLOC_SERVICE = "pdg-wloc"
+WLOC_OUTBOUND = "__pdg_wloc_mitm"
+WLOC_PORT = 9080
+WLOC_HOSTS = ("gs-loc.apple.com", "gs-loc-cn.apple.com")
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
+_WLOC_CONFIG_LOCK = threading.Lock()
 
 # ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
 _conn = None
@@ -92,7 +101,8 @@ MENU = {"inline_keyboard": [
     [{"text": "🔄 更新", "callback_data": "upd_check"}, {"text": "🩺 自检", "callback_data": "doctor"}],
     [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
     [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
-    [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
+    [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "📍 iOS 定位", "callback_data": "wloc"}],
+    [{"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 EXIT_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回出口管理", "callback_data": "nav:exit"}],
@@ -103,9 +113,110 @@ OPS_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回运维", "callback_data"
                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 DNS_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回 DNS 上游", "callback_data": "dnsup"}],
                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
+WLOC_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回 WLOC", "callback_data": "wloc"}],
+                                [{"text": "📱 客户端", "callback_data": "nav:client"}],
+                                [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 
 def _back_rows(kb):
     return [row[:] for row in kb["inline_keyboard"]]
+
+_WLOC_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+_WLOC_COORDINATES = re.compile(
+    rf"^\s*({_WLOC_NUMBER})\s*(?:[,，]|\s+)\s*({_WLOC_NUMBER})\s*$"
+)
+
+def _wloc_default():
+    return {"enabled": False, "latitude": None, "longitude": None,
+            "accuracy": 25, "label": None, "updated_at": None}
+
+def _wloc_validate(latitude, longitude, accuracy=25):
+    try:
+        lat, lon, acc = float(latitude), float(longitude), int(accuracy)
+    except (TypeError, ValueError) as e:
+        raise ValueError("经纬度和精度必须是数字") from e
+    if not math.isfinite(lat) or not -90 <= lat <= 90:
+        raise ValueError("纬度需在 -90~90")
+    if not math.isfinite(lon) or not -180 <= lon <= 180:
+        raise ValueError("经度需在 -180~180")
+    if not 1 <= acc <= 1000:
+        raise ValueError("精度需在 1~1000 米")
+    return lat, lon, acc
+
+def _wloc_parse_coordinates(text):
+    match = _WLOC_COORDINATES.fullmatch(str(text or ""))
+    if not match:
+        raise ValueError("格式应为：纬度,经度")
+    lat, lon, _ = _wloc_validate(match.group(1), match.group(2))
+    return lat, lon
+
+def _wloc_format(value):
+    return f"{float(value):.8f}".rstrip("0").rstrip(".")
+
+def _wloc_load():
+    config = _wloc_default()
+    try:
+        raw = json.load(open(WLOC_STATE))
+        if isinstance(raw, dict):
+            config.update(raw)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if config.get("enabled"):
+            lat, lon, acc = _wloc_validate(
+                config.get("latitude"), config.get("longitude"), config.get("accuracy", 25))
+            config.update({"enabled": True, "latitude": lat, "longitude": lon, "accuracy": acc})
+        else:
+            config["enabled"] = False
+    except ValueError:
+        config["enabled"] = False
+    return config
+
+def _wloc_active(config=None):
+    return bool((config or _wloc_load()).get("enabled"))
+
+def _wloc_write_state(config):
+    os.makedirs(os.path.dirname(WLOC_STATE), mode=0o755, exist_ok=True)
+    tmp = WLOC_STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+        f.flush(); os.fsync(f.fileno())
+    try:
+        owner = pwd.getpwnam("pdg-wloc")
+        os.chown(tmp, owner.pw_uid, owner.pw_gid)
+    except (KeyError, PermissionError):  # local unit tests do not create the service account
+        pass
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, WLOC_STATE)
+
+def _wloc_presets():
+    try:
+        raw = json.load(open(WLOC_PRESETS))
+        items = raw.get("presets", []) if isinstance(raw, dict) else raw
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(items, list):
+        return []
+    presets, seen = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        preset_id = str(item.get("id") or "").strip()
+        name = " ".join(str(item.get("name") or "").split())
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", preset_id)
+                or not name or len(name) > 40 or preset_id in seen):
+            continue
+        try:
+            lat, lon, acc = _wloc_validate(
+                item.get("latitude"), item.get("longitude"), item.get("accuracy", 25))
+        except ValueError:
+            continue
+        seen.add(preset_id)
+        presets.append({"id": preset_id, "name": name, "latitude": lat,
+                        "longitude": lon, "accuracy": acc})
+    return presets
+
+def _wloc_preset(preset_id):
+    return next((p for p in _wloc_presets() if p["id"] == preset_id), None)
 
 def _nav(key):
     """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
@@ -122,8 +233,10 @@ def _nav(key):
             [{"text": "✏️ 改出口", "callback_data": "edit_rule"}, {"text": "📚 加规则集", "callback_data": "add_rs"},
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
-        "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
-            [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
+        "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\n"
+                   "iOS 可生成私密 DNS 描述文件或使用服务端 WLOC:", [
+            [{"text": "📱 iOS 描述文件", "callback_data": "ios"},
+             {"text": "📍 iOS 虚拟定位", "callback_data": "wloc"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -133,6 +246,39 @@ def _nav(key):
     }
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
+
+def _wloc_page():
+    config = _wloc_load()
+    enabled = _wloc_active(config)
+    service = sh(["systemctl", "is-active", WLOC_SERVICE]).stdout.strip() == "active"
+    ca_ready = os.path.exists(WLOC_CA)
+    if enabled:
+        label = str(config.get("label") or "").strip()
+        target = ((f"<b>{_esc(label)}</b>  " if label else "")
+                  + f"<code>{_wloc_format(config['latitude'])},"
+                  f"{_wloc_format(config['longitude'])}</code> (±{config['accuracy']}m)")
+    else:
+        target = "未设置"
+    text = ("📍 <b>iOS WLOC 虚拟定位</b>\n"
+            "服务端只解密 Apple 的两个网络定位主机，普通流量仍走原有 5GPN。\n\n"
+            f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
+            f"MITM: {'🟢 运行中' if service else '⚪ 未运行'}\n"
+            f"专用 CA: {'✅ 已生成' if ca_ready else '未生成'}\n"
+            f"目标: {target}\n\n"
+            "首次使用先安装专用 CA，并在 iOS 对名为 mitmproxy 的证书开启完全信任。"
+            "常用地点按钮不会发送 Telegram Location。")
+    rows = [
+        [{"text": "📜 安装专用 CA", "callback_data": "wloc_ca"}],
+    ]
+    for preset in _wloc_presets()[:12]:
+        rows.append([{"text": "📌 " + preset["name"],
+                      "callback_data": "wloc_use:" + preset["id"]}])
+    rows.append([{"text": "✍️ 输入经纬度", "callback_data": "wloc_pick"}])
+    if enabled:
+        rows.append([{"text": "♻️ 关闭并恢复真实定位", "callback_data": "wloc_off"}])
+    rows.extend([[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+    return text, {"inline_keyboard": rows}
 
 def send(chat, text, kb=None):
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML",
@@ -426,13 +572,20 @@ def _mihomo_config(c):
                            "tolerance": int(o.get("tolerance", 50) or 50)})
         else:
             proxies.append(_mihomo_proxy(o))
+    wloc_enabled = _wloc_active()
+    if wloc_enabled:
+        proxies.append({"name": WLOC_OUTBOUND, "type": "http",
+                        "server": "127.0.0.1", "port": WLOC_PORT})
     providers = {}
     for rs in c.get("route", {}).get("rule_set", []):
         name = rs.get("tag")
         if not name:
             continue
         providers[name] = {"type": "file", "behavior": "classical", "path": _rule_provider_path(name, meta)}
-    rules = []
+    # Exact-domain rules must precede the server-IP reject rule. The phone sees the
+    # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
+    rules = ([f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in WLOC_HOSTS]
+             if wloc_enabled else [])
     for r in c.get("route", {}).get("rules", []):
         target = r.get("outbound")
         if r.get("action") == "reject":
@@ -529,6 +682,121 @@ def apply_sb(modify):
         sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
         return False, "重启 mihomo 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
     return True, ""
+
+def _wloc_mosdns_ready():
+    try:
+        text = open(MOSDNS_CONF).read()
+    except OSError:
+        return False
+    return all(marker in text for marker in
+               ("tag: geosite_wloc", "tag: wloc_sequence", "qname $geosite_wloc"))
+
+def _wloc_write_domains(enabled):
+    os.makedirs(os.path.dirname(WLOC_DOMAINS), exist_ok=True)
+    tmp = WLOC_DOMAINS + ".tmp"
+    with open(tmp, "w") as f:
+        if enabled:
+            f.write("\n".join("full:" + host for host in WLOC_HOSTS) + "\n")
+        f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, WLOC_DOMAINS)
+
+def _wloc_set_service(enabled):
+    if enabled:
+        result = sh(["systemctl", "enable", "--now", WLOC_SERVICE])
+        if result.returncode != 0 or not _svc_active(WLOC_SERVICE, need=2, max_polls=12):
+            return False, "WLOC MITM 服务启动失败: " + (result.stdout + result.stderr)[-300:]
+        return True, ""
+    result = sh(["systemctl", "disable", "--now", WLOC_SERVICE])
+    if result.returncode != 0:
+        return False, "WLOC MITM 服务停止失败: " + (result.stdout + result.stderr)[-300:]
+    return True, ""
+
+def _wloc_restart_mosdns():
+    result = sh(["systemctl", "restart", "mosdns"])
+    if result.returncode != 0 or not _svc_active("mosdns"):
+        return False, "mosdns 重启失败: " + (result.stdout + result.stderr)[-300:]
+    return True, ""
+
+def _wloc_restore_runtime(config):
+    """Best-effort rollback for a failed WLOC enable/disable transaction."""
+    enabled = _wloc_active(config)
+    _wloc_write_state(config)
+    _wloc_write_domains(enabled)
+    apply_sb(lambda c: None)
+    _wloc_restart_mosdns()
+    _wloc_set_service(enabled)
+
+def _wloc_ensure_ca():
+    if os.path.exists(WLOC_CA) and os.path.getsize(WLOC_CA) > 0:
+        return True, ""
+    keep_running = _wloc_active()
+    result = sh(["systemctl", "start", WLOC_SERVICE])
+    if result.returncode != 0:
+        return False, "无法启动 WLOC MITM 生成 CA: " + (result.stdout + result.stderr)[-300:]
+    for _ in range(30):
+        if os.path.exists(WLOC_CA) and os.path.getsize(WLOC_CA) > 0:
+            if not keep_running:
+                sh(["systemctl", "stop", WLOC_SERVICE])
+            return True, ""
+        time.sleep(0.2)
+    if not keep_running:
+        sh(["systemctl", "stop", WLOC_SERVICE])
+    return False, "WLOC MITM 已启动，但 6 秒内没有生成 CA"
+
+def set_wloc(latitude, longitude, accuracy=25, label=None):
+    lat, lon, acc = _wloc_validate(latitude, longitude, accuracy)
+    label = " ".join(str(label or "").split())[:64] or None
+    display_label = _esc(label) + " " if label else ""
+    with _WLOC_CONFIG_LOCK:
+        if not _wloc_mosdns_ready():
+            return False, "mosdns 尚未安装 WLOC 分支，请先运行 sudo pdg update"
+        previous = _wloc_load()
+        ok, msg = _wloc_set_service(True)
+        if not ok:
+            return False, msg
+        current = {"enabled": True, "latitude": lat, "longitude": lon, "accuracy": acc,
+                   "label": label,
+                   "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        _wloc_write_state(current)
+
+        # Coordinate changes while already enabled are intentionally restart-free.
+        if _wloc_active(previous):
+            return True, (f"✅ WLOC 目标已更新为 "
+                          f"{display_label}{_wloc_format(lat)}, {_wloc_format(lon)} "
+                          f"(±{acc}m)，mosdns/mihomo 未重启")
+
+        ok, msg = apply_sb(lambda c: None)  # add local HTTP outbound + exact-domain rules first
+        if not ok:
+            _wloc_restore_runtime(previous)
+            return False, msg
+        _wloc_write_domains(True)
+        ok, msg = _wloc_restart_mosdns()    # expose the gateway A record only after route is ready
+        if not ok:
+            _wloc_restore_runtime(previous)
+            return False, msg
+        return True, (f"✅ WLOC 已开启: "
+                      f"{display_label}{_wloc_format(lat)}, {_wloc_format(lon)} (±{acc}m)\n"
+                      "仅 gs-loc.apple.com / gs-loc-cn.apple.com 进入 MITM")
+
+def disable_wloc():
+    with _WLOC_CONFIG_LOCK:
+        previous = _wloc_load()
+        disabled = _wloc_default()
+        _wloc_write_state(disabled)         # any in-flight MITM response becomes passthrough first
+        _wloc_write_domains(False)
+        ok, msg = _wloc_restart_mosdns()    # clear lazy DNS cache before removing the route
+        if not ok:
+            _wloc_restore_runtime(previous)
+            return False, msg
+        ok, msg = apply_sb(lambda c: None)
+        if not ok:
+            _wloc_restore_runtime(previous)
+            return False, msg
+        ok, msg = _wloc_set_service(False)
+        if not ok:
+            return False, msg
+        return True, "✅ WLOC 已关闭，Apple 定位恢复原始直连"
 
 # 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
@@ -1670,14 +1938,56 @@ def _ios_profile(ssids=()):
         0, {"InterfaceTypeMatch": "WiFi", "SSIDMatch": list(ssids), "Action": "Disconnect"})
     return plistlib.dumps(p)
 
+def _wloc_ca_der():
+    if not os.path.exists(WLOC_CA):
+        raise FileNotFoundError("WLOC CA 尚未生成")
+    certificate = open(WLOC_CA, "rb").read()
+    if certificate.startswith(b"-----BEGIN CERTIFICATE-----"):
+        try:
+            certificate = ssl.PEM_cert_to_DER_cert(certificate.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as e:
+            raise ValueError("WLOC CA PEM 无法转换为 DER") from e
+    if not certificate:
+        raise ValueError("WLOC CA 为空")
+    return certificate
+
+def _wloc_ca_profile():
+    certificate = _wloc_ca_der()
+    cert_uuid = "A61C8705-EB50-5CE6-A6B0-DAEAD2E4D543"
+    profile_uuid = "2F95DD00-4E22-5D30-A761-335C3F427D50"
+    payload = {
+        "PayloadContent": [{
+            "PayloadCertificateFileName": "PrivDNS-WLOC-CA.cer",
+            "PayloadContent": certificate,
+            "PayloadDescription": "仅供自有 PrivDNS Gateway WLOC MITM 使用的根证书",
+            "PayloadDisplayName": "PrivDNS WLOC CA",
+            "PayloadIdentifier": "com.privdns-gateway.wloc.ca.certificate",
+            "PayloadOrganization": "PrivDNS Gateway",
+            "PayloadType": "com.apple.security.root",
+            "PayloadUUID": cert_uuid,
+            "PayloadVersion": 1,
+        }],
+        "PayloadDescription": "PrivDNS Gateway 服务端 WLOC 专用 CA",
+        "PayloadDisplayName": "PrivDNS WLOC CA",
+        "PayloadIdentifier": "com.privdns-gateway.wloc.ca",
+        "PayloadOrganization": "PrivDNS Gateway",
+        "PayloadRemovalDisallowed": False,
+        "PayloadScope": "System",
+        "PayloadType": "Configuration",
+        "PayloadUUID": profile_uuid,
+        "PayloadVersion": 1,
+    }
+    return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False)
+
 # ── 配置备份 / 恢复 ──
-BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
+BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META, WLOC_PRESETS]
 RESTORE_MAP = {
     "etc/mihomo/state.json": STATE,
     "etc/mihomo/config.yaml": MIHOMO_CFG,
     "etc/mosdns/config.yaml": MOSDNS_CONF,
     "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
     "opt/pdg-bot/rulesets.json": RS_META,
+    "etc/privdns-gateway/wloc-presets.json": WLOC_PRESETS,
 }
 
 def backup_blob():
@@ -1896,6 +2206,59 @@ def handle_cb(chat, mid, data, cb_id=None):
         edit(chat, mid, status_text(), MENU); return
     if data.startswith("nav:"):
         title, kb = _nav(data[4:]); edit(chat, mid, title, kb); return
+    if data == "wloc":
+        state.pop(chat, None)
+        title, kb = _wloc_page(); edit(chat, mid, title, kb); return
+    if data == "wloc_ca":
+        state.pop(chat, None)
+        edit(chat, mid, "正在准备 WLOC 专用 CA…", WLOC_BACK)
+        def _wca():
+            ok, msg = _wloc_ensure_ca()
+            if not ok:
+                edit(chat, mid, "❌ " + msg, WLOC_BACK); return
+            try:
+                cert = _wloc_ca_der()
+                fingerprint = hashlib.sha256(cert).hexdigest().upper()
+                send_document(chat, "PrivDNS-WLOC-CA.mobileconfig", _wloc_ca_profile(),
+                              "📜 PrivDNS WLOC 专用 CA\n"
+                              f"SHA-256: <code>{fingerprint}</code>\n\n"
+                              "安装后还要到 设置→通用→关于本机→证书信任设置，"
+                              "对 <b>mitmproxy</b> 开启完全信任。首次启用定位后请重启 iPhone。")
+                edit(chat, mid, "✅ CA 描述文件已发送。安装后请对 mitmproxy 开启完全信任，"
+                     "再选择目标位置并重启 iPhone。", WLOC_BACK)
+            except Exception as e:  # noqa: BLE001
+                edit(chat, mid, f"❌ CA 描述文件生成失败: {e}", WLOC_BACK)
+        run_bg(_wca); return
+    if data == "wloc_pick":
+        state[chat] = "wloc_location"
+        edit(chat, mid, "✍️ <b>输入目标经纬度</b>\n"
+             "发送 WGS84 <code>纬度,经度</code>，例如 <code>22.303611,114.165</code>。\n"
+             "不想把坐标发到 Telegram 时，请返回 WLOC 直接点服务器预置地点。\n"
+             "首次设置会启动 WLOC sidecar 并重载一次 DNS/代理；以后换坐标无需重启。/cancel 取消。",
+             WLOC_BACK); return
+    if data.startswith("wloc_use:"):
+        preset = _wloc_preset(data.split(":", 1)[1])
+        if not preset:
+            edit(chat, mid, "这个预置已不存在，请重新打开 WLOC 菜单。", WLOC_BACK); return
+        edit(chat, mid, f"正在应用预置地点 <b>{_esc(preset['name'])}</b>…", WLOC_BACK)
+        def _wp(p=preset):
+            ok, msg = set_wloc(p["latitude"], p["longitude"], p["accuracy"], p["name"])
+            title, kb = _wloc_page()
+            edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
+        run_bg(_wp); return
+    if data == "wloc_off":
+        edit(chat, mid, "确认关闭 WLOC 并恢复 Apple 原始定位？\n"
+             "会先撤销 DNS 劫持和 mihomo 规则，再停止 MITM sidecar。",
+             {"inline_keyboard": [
+                 [{"text": "确认关闭", "callback_data": "wloc_off_yes"}],
+                 [{"text": "取消", "callback_data": "wloc"}]]}); return
+    if data == "wloc_off_yes":
+        edit(chat, mid, "正在安全撤销 WLOC…", WLOC_BACK)
+        def _woff():
+            ok, msg = disable_wloc()
+            title, kb = _wloc_page()
+            edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
+        run_bg(_woff); return
     if data == "setdot":
         state[chat] = "set_dot"
         edit(chat, mid, "发你的自定义 DoT 域名(先把它的 A 记录指向本机, Cloudflare 用「灰云 DNS only」)。\n"
@@ -2178,6 +2541,17 @@ def handle_cb(chat, mid, data, cb_id=None):
         run_bg(_drs); return
 
 # ── 文本 ──
+def _start_wloc_set(chat, latitude, longitude, label=None):
+    send_plain(chat, "⏳ 正在应用 WLOC 目标位置…")
+    def _set():
+        try:
+            ok, msg = set_wloc(latitude, longitude, label=label)
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, str(e)
+        title, kb = _wloc_page()
+        send(chat, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
+    run_bg(_set)
+
 def handle_text(chat, text, msg_id=None):
     text = text.strip()
     if text == "/cancel":
@@ -2214,6 +2588,9 @@ def handle_text(chat, text, msg_id=None):
         if cmd == "/delrs":
             m = _rs_meta()
             send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
+        if cmd == "/wloc":
+            state.pop(chat, None)
+            title, kb = _wloc_page(); send(chat, title, kb); return
         if cmd == "/ios":
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
@@ -2237,6 +2614,14 @@ def handle_text(chat, text, msg_id=None):
             send_plain(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.pop(chat, None) or ""   # 无待输入时为 "", 避免下面 act.startswith(...) 在 None 上崩
+    if act == "wloc_location":
+        try:
+            lat, lon = _wloc_parse_coordinates(text)
+        except ValueError as e:
+            state[chat] = "wloc_location"
+            send(chat, f"坐标无效: {e}\n请重试，格式为 <code>纬度,经度</code>。/cancel 取消。", WLOC_BACK)
+            return
+        _start_wloc_set(chat, lat, lon); return
     if act == "add_exit":
         # 对齐 5GPN-X: 立刻删含密码消息 + 后台解析写入, 主循环不堵
         link = text
@@ -2345,6 +2730,21 @@ def handle_text(chat, text, msg_id=None):
         return
     send_plain(chat, "发 /start 打开菜单")
 
+# ── Telegram 位置 / 地点 ──
+def handle_location(chat, location):
+    if state.get(chat) != "wloc_location":
+        title, kb = _wloc_page()
+        send(chat, "收到位置。若要用于 WLOC，请先点「发送位置 / 经纬度」。\n\n" + title, kb)
+        return
+    state.pop(chat, None)
+    try:
+        lat, lon, _ = _wloc_validate(location.get("latitude"), location.get("longitude"))
+    except (AttributeError, ValueError) as e:
+        state[chat] = "wloc_location"
+        send(chat, f"位置无效: {e}\n请重新发送。/cancel 取消。", WLOC_BACK)
+        return
+    _start_wloc_set(chat, lat, lon)
+
 # ── 文件 (配置恢复) ──
 def handle_document(chat, doc):
     if state.get(chat) != "restore":
@@ -2366,6 +2766,7 @@ def main():
     post("deleteWebhook", {"drop_pending_updates": False})
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
+        {"command": "wloc", "description": "iOS WLOC 虚拟定位"},
         {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
@@ -2382,8 +2783,11 @@ def main():
                     m = u["message"]
                     if m["from"]["id"] not in ALLOWED:
                         continue
+                    location = m.get("location") or m.get("venue", {}).get("location")
                     if "text" in m:
                         handle_text(m["chat"]["id"], m["text"], m.get("message_id"))
+                    elif location:
+                        handle_location(m["chat"]["id"], location)
                     elif "document" in m:
                         handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:

@@ -34,13 +34,14 @@ pdg_fetch_release_tags(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns mihomo pdg-bot pdg-probe81; do
+  for s in mosdns mihomo pdg-bot pdg-probe81 pdg-wloc; do
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports
-  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090)\b' | sed 's/^://' | sort -u | sed 's/^9090$/9090(local clash_api)/' | tr '\n' ' ')
+  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9080|9090)\b' | sed 's/^://' | sort -u \
+    | sed 's/^9080$/9080(local WLOC MITM)/; s/^9090$/9090(local clash_api)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
 }
@@ -353,12 +354,15 @@ SNAP_DIR="/var/lib/privdns-gateway/backups"
 
 cmd_snapshot(){
   need_root snapshot; _lock
-  local ts d; ts=$(date +%Y%m%d-%H%M%S); d="$SNAP_DIR/$ts"
+  local ts d; local -a paths
+  ts=$(date +%Y%m%d-%H%M%S); d="$SNAP_DIR/$ts"
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service(相对 / 打包, 回滚直接 -C / 解开)
-  tar czf "$d/snap.tar.gz" -C / \
-    etc/mosdns etc/mihomo opt/pdg-bot etc/privdns-gateway \
-    etc/nftables.conf etc/systemd/system/pdg-bot.service 2>/dev/null
+  paths=(etc/mosdns etc/mihomo opt/pdg-bot etc/privdns-gateway
+         etc/nftables.conf etc/systemd/system/pdg-bot.service)
+  [[ -d /var/lib/pdg-wloc ]] && paths+=(var/lib/pdg-wloc)
+  [[ -f /etc/systemd/system/pdg-wloc.service ]] && paths+=(etc/systemd/system/pdg-wloc.service)
+  tar czf "$d/snap.tar.gz" -C / "${paths[@]}" 2>/dev/null
   chmod 600 "$d/snap.tar.gz"
   echo "✅ 快照: $d/snap.tar.gz"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
@@ -388,6 +392,11 @@ cmd_rollback(){
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
   systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
+  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1; then
+    systemctl enable --now pdg-wloc 2>/dev/null || true
+  else
+    systemctl disable --now pdg-wloc 2>/dev/null || true
+  fi
   echo "✅ 已回滚并重启服务"
 }
 
@@ -425,6 +434,28 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
+  if ! command -v mitmdump >/dev/null; then
+    c_g "安装 WLOC sidecar 依赖 mitmproxy…"
+    if ! apt-get update -qq \
+      || ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mitmproxy >/dev/null; then
+      c_y "mitmproxy 安装失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    fi
+  fi
+  id -u pdg-wloc >/dev/null 2>&1 || useradd --system --home-dir /var/lib/pdg-wloc --shell /usr/sbin/nologin pdg-wloc
+  install -d -m755 /var/lib/pdg-wloc
+  install -d -o pdg-wloc -g pdg-wloc -m700 /var/lib/pdg-wloc/mitmproxy
+  [[ -f /var/lib/pdg-wloc/wloc.json ]] \
+    || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/wloc/wloc.json /var/lib/pdg-wloc/wloc.json
+  [[ -f /etc/mosdns/rules/wloc.txt ]] || install -m644 /dev/null /etc/mosdns/rules/wloc.txt
+  install -d -m700 /etc/privdns-gateway
+  [[ -f /etc/privdns-gateway/wloc-presets.json ]] \
+    || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json
+  install -m755 "$REPO_DIR"/deploy/wloc/wloc_mitm.py        /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/wloc/migrate_wloc.py     /opt/pdg-bot/
+  install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service    /etc/systemd/system/
+  if ! python3 /opt/pdg-bot/migrate_wloc.py /etc/mosdns/config.yaml; then
+    c_y "mosdns WLOC 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
@@ -454,6 +485,15 @@ cmd_update(){
   fi
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
+  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1; then
+    systemctl enable pdg-wloc >/dev/null 2>&1 || true
+    if ! systemctl restart pdg-wloc \
+      || [[ "$(systemctl is-active pdg-wloc 2>/dev/null)" != "active" ]]; then
+      c_y "pdg-wloc 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    fi
+  else
+    systemctl disable --now pdg-wloc >/dev/null 2>&1 || true
+  fi
   systemctl restart pdg-bot pdg-probe81 2>/dev/null || true
   sleep 2
 
@@ -485,9 +525,14 @@ cmd_update(){
 
 cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
-cmd_restart(){ need_root restart; systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81"; }
+cmd_restart(){
+  need_root restart
+  systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null
+  systemctl try-restart pdg-wloc 2>/dev/null || true
+  echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81 (WLOC 开启时一并重启 sidecar)"
+}
 
-cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -n "${1:-40}" --no-pager -o cat; }
+cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -u pdg-wloc -n "${1:-40}" --no-pager -o cat; }
 
 cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
 

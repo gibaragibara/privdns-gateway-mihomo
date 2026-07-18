@@ -25,6 +25,10 @@ plugins:
   - tag: geosite_unlock
     type: domain_set
     args: { files: ["/etc/mosdns/rules/unlock.txt"] }
+  # WLOC 域名集由 bot 启停: 空文件=完全不劫持; 开启时仅含两个 Apple 网络定位主机。
+  - tag: geosite_wloc
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/wloc.txt"] }
   - tag: geosite_cn
     type: domain_set
     args: { files: ["/etc/mosdns/rules/geosite_cn.txt","/etc/mosdns/rules/geosite_apple.txt","/etc/mosdns/rules/custom_direct.txt"] }
@@ -50,11 +54,28 @@ plugins:
     args:
       size: 8192
       lazy_cache_ttl: 86400
+  # 只处理 WLOC 两域名: A 指到网关, AAAA/HTTPS 置空; 其它类型走真实上游。
+  - tag: wloc_sequence
+    type: sequence
+    args:
+      - matches: qtype 28
+        exec: reject 0
+      - exec: jump has_resp
+      - matches: qtype 65
+        exec: reject 0
+      - exec: jump has_resp
+      - matches: qtype 1
+        exec: black_hole __SERVER_IP__
+      - exec: jump has_resp
+      - exec: $ecs_neutral
+      - exec: $remote_upstream
   - tag: internal_sequence
     type: sequence
     args:
       - exec: $lazy_cache
       - exec: jump has_resp
+      - matches: qname $geosite_wloc
+        exec: goto wloc_sequence
       - matches: qname $geosite_cn
         exec: $ecs_china
       - matches: qname $geosite_cn

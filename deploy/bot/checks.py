@@ -7,6 +7,9 @@ STATE = "/etc/mihomo/state.json"
 MIHOMO_CFG = "/etc/mihomo/config.yaml"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
+WLOC_STATE = "/var/lib/pdg-wloc/wloc.json"
+WLOC_DOMAINS = "/etc/mosdns/rules/wloc.txt"
+WLOC_CA = "/var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer"
 
 def _run(cmd, t=10):
     try:
@@ -175,6 +178,40 @@ def check_mihomo_config():
     return ("ok", "mihomo 配置", "test 通过") if rc == 0 \
         else ("fail", "mihomo 配置", "test 失败: " + (out + err)[-200:])
 
+def check_wloc():
+    try:
+        config = json.load(open(WLOC_STATE))
+    except Exception:  # noqa: BLE001
+        config = {"enabled": False}
+    enabled = bool(config.get("enabled"))
+    active = _run(["systemctl", "is-active", "pdg-wloc"])[1].strip() == "active"
+    if not enabled:
+        return (("warn", "WLOC", "配置已关闭但 pdg-wloc 仍在运行") if active
+                else ("ok", "WLOC", "关闭(普通流量不经过 MITM)"))
+    problems = []
+    if not active:
+        problems.append("pdg-wloc 未运行")
+    if not os.path.exists(WLOC_CA):
+        problems.append("专用 CA 缺失")
+    try:
+        domains = set(open(WLOC_DOMAINS).read().split())
+    except OSError:
+        domains = set()
+    expected = {"full:gs-loc.apple.com", "full:gs-loc-cn.apple.com"}
+    if domains != expected:
+        problems.append("mosdns WLOC 域名集不完整")
+    try:
+        mihomo = open(MIHOMO_CFG).read()
+    except OSError:
+        mihomo = ""
+    if "__pdg_wloc_mitm" not in mihomo or not all(item[5:] in mihomo for item in expected):
+        problems.append("mihomo WLOC 规则缺失")
+    if problems:
+        return ("fail", "WLOC", "; ".join(problems))
+    label = str(config.get("label") or "").strip()
+    target = f"{config.get('latitude')},{config.get('longitude')}"
+    return ("ok", "WLOC", f"开启 → {(label + ' ') if label else ''}{target}")
+
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():
     d = _dot_domain()
@@ -321,8 +358,9 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config]
-ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
+       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config,
+       check_wloc]
+ALERT = [check_services, check_dns, check_cert, check_wloc]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
 

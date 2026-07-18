@@ -3,8 +3,8 @@
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "请用 root 运行"; exit 1; }
 
-systemctl disable --now pdg-bot pdg-probe81 mosdns mihomo pdg-rules-update.timer pdg-health.timer 2>/dev/null || true
-rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
+systemctl disable --now pdg-bot pdg-probe81 pdg-wloc mosdns mihomo pdg-rules-update.timer pdg-health.timer 2>/dev/null || true
+rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,pdg-wloc,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
       /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
       /etc/systemd/system/journald.conf.d/50-pdg.conf
 systemctl daemon-reload
@@ -25,11 +25,12 @@ elif [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
 fi
 
 echo "已停止并移除 systemd 单元、防火墙表(inet pdg)、并尽量还原 DNS。"
-echo "保留: /etc/mosdns /etc/mihomo /opt/pdg-bot 与 Let's Encrypt 证书。"
+echo "保留: /etc/mosdns /etc/mihomo /opt/pdg-bot /var/lib/pdg-wloc(CA) 与 Let's Encrypt 证书。"
 
 if [[ "${1:-}" == "--purge" ]]; then
   echo "[--purge] 删除配置与数据…"
-  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway   # /etc/privdns-gateway 含 bot.env(token)
+  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway /var/lib/pdg-wloc   # 含 bot.env/token 与 WLOC CA
+  userdel pdg-wloc 2>/dev/null || true
   rm -f /usr/local/bin/mosdns /usr/local/bin/mihomo /usr/local/bin/pdg-mihomo-tproxy.sh \
         /usr/local/bin/pdg /usr/local/bin/pdg-set-token \
         /usr/local/bin/proxy-gateway-open-cert-http.sh \

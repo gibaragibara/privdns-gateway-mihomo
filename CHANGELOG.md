@@ -2,6 +2,15 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-18 — 未发布(服务端 WLOC，无需 Egern)
+
+- 新增 `pdg-wloc` mitmproxy sidecar，只监听 `127.0.0.1:9080`，并只改写 Apple 两个网络定位主机的 `/clls/wloc` protobuf 响应。
+- Telegram Bot 新增 `/wloc` 与客户端菜单：生成/下发专用 CA 描述文件、接收 Telegram 位置或 WGS84 经纬度、启停及恢复真实定位。
+- 主菜单新增 WLOC 直达入口，并支持服务器端常用地点按钮；选择预置无需发送 Telegram Location，地点由可热更新的 `wloc-presets.json` 管理。
+- WLOC 开启时才向 mosdns/mihomo 注入两域名分支；关闭后清空 DNS 集合、删除 sidecar 出口并停止服务。已开启时换坐标不重启 DNS/代理。
+- 安装、tag-only 更新、快照/回滚、健康检查和卸载均接入 WLOC；CA 私钥只保存在服务器 `/var/lib/pdg-wloc/mitmproxy`。
+- 新增 WLOC protobuf、Bot 事务、mosdns 老装迁移、健康检查和生命周期回归测试。
+
 ## 2026-07-13 — v1.2.3(国内名单改用 blackmatrix7 ChinaMax)
 
 - 每日 `update-rules.sh` 拉取 [ChinaMax.list](https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Clash/ChinaMax) → `geosite_cn.txt`(mosdns 国内直连主名单)。
