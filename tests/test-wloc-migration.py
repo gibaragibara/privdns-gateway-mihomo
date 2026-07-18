@@ -17,7 +17,9 @@ ready, changed = migration.migrate_text(current)
 assert not changed and ready == current
 
 legacy = current.replace(migration.DOMAIN_PLUGIN, "", 1)
+legacy = legacy.replace(migration.ADBLOCK_DOMAIN_PLUGIN, "", 1)
 legacy = legacy.replace(migration.SEQUENCE_PLUGIN, "", 1)
+legacy = legacy.replace(migration.ADBLOCK_DISPATCH, "", 1)
 legacy = legacy.replace(migration.DISPATCH, "", 1)
 assert "geosite_wloc" not in legacy and "wloc_sequence" not in legacy
 
@@ -38,5 +40,18 @@ except ValueError as exc:
     assert "partially present" in str(exc)
 else:
     raise AssertionError("partial WLOC migration must be rejected")
+
+wloc_only = current.replace(migration.ADBLOCK_DOMAIN_PLUGIN, "", 1)
+wloc_only = wloc_only.replace(migration.ADBLOCK_DISPATCH, "", 1)
+migrated, changed = migration.migrate_text(wloc_only)
+assert changed and migrated == current
+
+try:
+    migration.migrate_text(wloc_only.replace(
+        "  - tag: geosite_cn\n", migration.ADBLOCK_DOMAIN_PLUGIN + "  - tag: geosite_cn\n", 1))
+except ValueError as exc:
+    assert "adblock" in str(exc)
+else:
+    raise AssertionError("partial adblock migration must be rejected")
 
 print("wloc-migration regression OK")

@@ -81,9 +81,10 @@ sudo ./install.sh
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
 3. iOS:bot **📱 客户端 → iOS 描述文件**(可填强制直连的 Wi-Fi SSID);**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝均靠服务器 `:81` 探测判定是否启用 DoT(普通宽带 Wi-Fi 探不通则自动直连)。
-4. iOS 网络虚拟定位(可选):主菜单 **📍 iOS 定位**或 `/wloc`。安装 Bot 下发的专用 CA 后，可直接点击服务器预置地点，不必发送 Telegram Location；也支持手工输入经纬度。服务端只 MITM 两个 Apple 定位域名，**无需 Egern/Surge/Loon**。详见 [WLOC 使用说明](docs/WLOC.md)。
-5. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
-6. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
+4. iOS 网络虚拟定位(可选):主菜单 **📍 iOS 定位**或 `/wloc`。安装 Bot 下发的共享 CA 后，可直接点击服务器预置地点，不必发送 Telegram Location；也支持手工输入经纬度。服务端只对两个 Apple 定位域名启用 WLOC 改写，**无需 Egern/Surge/Loon**。详见 [WLOC 使用说明](docs/WLOC.md)。
+5. MITM 去广告(可选):主菜单 **🛡 MITM 去广告**或 `/adblock`。它复用同一张 CA，只把声明式规则的精确主机送入 sidecar；关闭 WLOC 不会关闭仍被去广告使用的 MITM。详见 [MITM 去广告说明](docs/MITM-ADBLOCK.md)。
+6. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
+7. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
 
@@ -114,8 +115,8 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853 公网)。WhatsApp 等无 SNI 域名返回真实 IP(配合 TPROXY) |
 | 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
-| 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/WLOC/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
-| WLOC(可选) | **mitmproxy sidecar** | 仅开启时运行;只处理 `gs-loc.apple.com` / `gs-loc-cn.apple.com`,本地监听 `:9080` |
+| 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/WLOC/去广告/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
+| 共享 MITM(可选) | **mitmproxy sidecar** | WLOC/去广告按功能独立启停并复用同一 CA；只监听本机 `:9080`，两项都关闭才停止 |
 | 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |
 | 防火墙 | **nftables** | 全网 SSH + **DoT 853**;53/80/81/443/5228-5230/8445 等仅内网卡;内网 tcp/udp TPROXY 到 mihomo |
 
@@ -124,7 +125,8 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — 新手图文
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/WLOC.md](docs/WLOC.md) — 无 Egern 的服务端 iOS WLOC、专用 CA 与恢复流程
+- [docs/WLOC.md](docs/WLOC.md) — 无 Egern 的服务端 iOS WLOC、共享 CA 与恢复流程
+- [docs/MITM-ADBLOCK.md](docs/MITM-ADBLOCK.md) — 声明式模块移植范围、共享生命周期与限制
 - [docs/UPSTREAM.md](docs/UPSTREAM.md) — 与上游关系 / 如何吸收新提交
 - [docs/production-notes.md](docs/production-notes.md) — 架构说明
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志

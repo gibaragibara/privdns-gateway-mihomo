@@ -218,6 +218,8 @@ install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/wloc/wloc_mitm.py        /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/wloc/migrate_wloc.py     /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/mitm/adblock_mitm.py     /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/mitm/sync_adblock.py     /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
@@ -233,7 +235,9 @@ fi
 : > /etc/mosdns/rules/custom_direct.txt
 : > /etc/mosdns/rules/unlock.txt          # WDA 解锁域名集(空=休眠; bot『🔓 解锁走 WDA』填充)
 [[ -f /etc/mosdns/rules/wloc.txt ]] \
-  || : > /etc/mosdns/rules/wloc.txt       # WLOC 两域名(空=关闭, 普通流量完全不进 MITM)
+  || : > /etc/mosdns/rules/wloc.txt       # WLOC 两域名(空=Apple 定位不进共享 MITM)
+[[ -f /etc/mosdns/rules/adblock.txt ]] \
+  || : > /etc/mosdns/rules/adblock.txt    # 声明式去广告精确主机(空=关闭)
 # WhatsApp 无 SNI: 返回真实 A(不劫持); 模板随仓库, 缺则建默认
 if [[ -f "$REPO_DIR/deploy/mosdns/rules/whatsapp.txt" ]]; then
   install -m644 "$REPO_DIR/deploy/mosdns/rules/whatsapp.txt" /etc/mosdns/rules/whatsapp.txt
@@ -265,6 +269,8 @@ chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token �
 install -d -m700 /etc/privdns-gateway
 [[ -f /etc/privdns-gateway/wloc-presets.json ]] \
   || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json
+[[ -f /etc/privdns-gateway/adblock-sources.json ]] \
+  || install -m600 "$REPO_DIR"/deploy/mitm/adblock-sources.json /etc/privdns-gateway/adblock-sources.json
 ( umask 077; printf 'PDG_BOT_TOKEN=%s\nPDG_BOT_ALLOWED=%s\n' "$BOT_TOKEN" "$ALLOWED_IDS" > /etc/privdns-gateway/bot.env )
 chmod 600 /etc/privdns-gateway/bot.env
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/system/
@@ -277,8 +283,16 @@ install -d -m755 /var/lib/pdg-wloc
 install -d -o pdg-wloc -g pdg-wloc -m700 /var/lib/pdg-wloc/mitmproxy
 [[ -f /var/lib/pdg-wloc/wloc.json ]] \
   || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/wloc/wloc.json /var/lib/pdg-wloc/wloc.json
+[[ -f /var/lib/pdg-wloc/adblock.json ]] \
+  || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/mitm/adblock.json /var/lib/pdg-wloc/adblock.json
 install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/firewall/journald-50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf
+
+# A preserved enabled state needs its compiled cache before Bot renders the
+# matching mosdns/mihomo exact-host routes.
+if jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
+  python3 /opt/pdg-bot/sync_adblock.py || die "MITM 去广告规则同步失败"
+fi
 
 python3 - <<'PY'
 import importlib.util
@@ -287,6 +301,7 @@ bot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bot)
 bot._write(bot.load())
 bot._wloc_write_domains(bot._wloc_active())
+bot._adblock_write_domains(bot._adblock_active())
 PY
 
 cat > /etc/systemd/system/mosdns.service <<'EOF'
@@ -344,15 +359,16 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-# Start once to generate the dedicated CA. Fresh installs stop it again; a forced
-# reinstall preserves an existing enabled WLOC state and leaves the sidecar active.
+# Start once to generate the shared CA. Fresh installs stop it again; a forced
+# reinstall preserves any enabled MITM feature and leaves the sidecar active.
 systemctl start pdg-wloc
 for _ in $(seq 1 30); do
   [[ -s /var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer ]] && break
   sleep 0.2
 done
-[[ -s /var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer ]] || die "WLOC sidecar 未能生成专用 CA"
-if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1; then
+[[ -s /var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer ]] || die "共享 MITM 未能生成 CA"
+if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
+  || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
   systemctl enable pdg-wloc >/dev/null 2>&1 || true
 else
   systemctl disable --now pdg-wloc >/dev/null 2>&1 || true

@@ -29,7 +29,7 @@ echo "保留: /etc/mosdns /etc/mihomo /opt/pdg-bot /var/lib/pdg-wloc(CA) 与 Let
 
 if [[ "${1:-}" == "--purge" ]]; then
   echo "[--purge] 删除配置与数据…"
-  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway /var/lib/pdg-wloc   # 含 bot.env/token 与 WLOC CA
+  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway /var/lib/pdg-wloc   # 含 bot.env/token 与共享 MITM CA
   userdel pdg-wloc 2>/dev/null || true
   rm -f /usr/local/bin/mosdns /usr/local/bin/mihomo /usr/local/bin/pdg-mihomo-tproxy.sh \
         /usr/local/bin/pdg /usr/local/bin/pdg-set-token \

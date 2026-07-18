@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Python 语法 (py_compile)
-        run: python3 -m py_compile deploy/bot/*.py deploy/wloc/*.py tests/*.py
+        run: python3 -m py_compile deploy/bot/*.py deploy/wloc/*.py deploy/mitm/*.py tests/*.py
 
       - name: Shell 语法 (bash -n)
         run: |
@@ -40,7 +40,7 @@ jobs:
             if command -v jq >/dev/null; then render "$t" | jq -e . > /dev/null; fi
             echo "  OK"
           done
-          for f in deploy/wloc/*.json; do
+          for f in deploy/wloc/*.json deploy/mitm/*.json; do
             echo "→ 校验 $f"
             python3 -m json.tool "$f" > /dev/null
             echo "  OK"
@@ -94,8 +94,10 @@ jobs:
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 
-      - name: "WLOC 回归 (protobuf / Bot / mosdns 迁移 / 健康检查)"
+      - name: "共享 MITM 回归 (WLOC / 去广告 / Bot / 迁移 / 健康检查)"
         run: |
+          python3 tests/test-adblock-sync.py
+          python3 tests/test-adblock-mitm.py
           python3 tests/test-wloc-mitm.py
           python3 tests/test-wloc-bot.py
           python3 tests/test-wloc-migration.py

@@ -41,7 +41,7 @@ cmd_status(){
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports
   ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9080|9090)\b' | sed 's/^://' | sort -u \
-    | sed 's/^9080$/9080(local WLOC MITM)/; s/^9090$/9090(local clash_api)/' | tr '\n' ' ')
+    | sed 's/^9080$/9080(local shared MITM)/; s/^9090$/9090(local clash_api)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
 }
@@ -392,7 +392,8 @@ cmd_rollback(){
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
   systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
-  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1; then
+  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
+    || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
     systemctl enable --now pdg-wloc 2>/dev/null || true
   else
     systemctl disable --now pdg-wloc 2>/dev/null || true
@@ -435,7 +436,7 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
   if ! command -v mitmdump >/dev/null; then
-    c_g "安装 WLOC sidecar 依赖 mitmproxy…"
+    c_g "安装共享 MITM sidecar 依赖 mitmproxy…"
     if ! apt-get update -qq \
       || ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mitmproxy >/dev/null; then
       c_y "mitmproxy 安装失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
@@ -446,15 +447,22 @@ cmd_update(){
   install -d -o pdg-wloc -g pdg-wloc -m700 /var/lib/pdg-wloc/mitmproxy
   [[ -f /var/lib/pdg-wloc/wloc.json ]] \
     || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/wloc/wloc.json /var/lib/pdg-wloc/wloc.json
+  [[ -f /var/lib/pdg-wloc/adblock.json ]] \
+    || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/mitm/adblock.json /var/lib/pdg-wloc/adblock.json
   [[ -f /etc/mosdns/rules/wloc.txt ]] || install -m644 /dev/null /etc/mosdns/rules/wloc.txt
+  [[ -f /etc/mosdns/rules/adblock.txt ]] || install -m644 /dev/null /etc/mosdns/rules/adblock.txt
   install -d -m700 /etc/privdns-gateway
   [[ -f /etc/privdns-gateway/wloc-presets.json ]] \
     || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json
+  [[ -f /etc/privdns-gateway/adblock-sources.json ]] \
+    || install -m600 "$REPO_DIR"/deploy/mitm/adblock-sources.json /etc/privdns-gateway/adblock-sources.json
   install -m755 "$REPO_DIR"/deploy/wloc/wloc_mitm.py        /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/wloc/migrate_wloc.py     /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/mitm/adblock_mitm.py     /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/mitm/sync_adblock.py     /opt/pdg-bot/
   install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service    /etc/systemd/system/
   if ! python3 /opt/pdg-bot/migrate_wloc.py /etc/mosdns/config.yaml; then
-    c_y "mosdns WLOC 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "mosdns 共享 MITM 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
@@ -472,6 +480,24 @@ cmd_update(){
   migrate_fw_android_dot_gms  # 老装: 853 公网 DoT(安卓 Wi-Fi) + GMS 5228-5230
   migrate_mosdns_whatsapp     # 老装: WhatsApp 无 SNI 返回真实 IP
 
+  if jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
+    if ! python3 /opt/pdg-bot/sync_adblock.py; then
+      c_y "MITM 去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    fi
+  fi
+  if ! python3 - <<'PY'
+import importlib.util
+spec = importlib.util.spec_from_file_location("pdg_bot", "/opt/pdg-bot/bot.py")
+bot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bot)
+bot._write(bot.load())
+bot._wloc_write_domains(bot._wloc_active())
+bot._adblock_write_domains(bot._adblock_active())
+PY
+  then
+    c_y "共享 MITM 路由渲染失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
+
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
   if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
@@ -485,16 +511,17 @@ cmd_update(){
   fi
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
-  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1; then
+  if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
+    || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
     systemctl enable pdg-wloc >/dev/null 2>&1 || true
     if ! systemctl restart pdg-wloc \
       || [[ "$(systemctl is-active pdg-wloc 2>/dev/null)" != "active" ]]; then
-      c_y "pdg-wloc 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+      c_y "共享 MITM 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
     fi
   else
     systemctl disable --now pdg-wloc >/dev/null 2>&1 || true
   fi
-  systemctl restart pdg-bot pdg-probe81 2>/dev/null || true
+  systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
   sleep 2
 
   # token 是否已配置(未配则 pdg-bot 不在跑属正常, 不据此回滚)
@@ -529,7 +556,7 @@ cmd_restart(){
   need_root restart
   systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null
   systemctl try-restart pdg-wloc 2>/dev/null || true
-  echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81 (WLOC 开启时一并重启 sidecar)"
+  echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81 (任一 MITM 功能开启时一并重启 sidecar)"
 }
 
 cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -u pdg-wloc -n "${1:-40}" --no-pager -o cat; }

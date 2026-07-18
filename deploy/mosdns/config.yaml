@@ -29,6 +29,10 @@ plugins:
   - tag: geosite_wloc
     type: domain_set
     args: { files: ["/etc/mosdns/rules/wloc.txt"] }
+  # 声明式去广告精确主机集由 bot 同步；空文件=关闭，不扩大 MITM 范围。
+  - tag: geosite_adblock
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/adblock.txt"] }
   - tag: geosite_cn
     type: domain_set
     args: { files: ["/etc/mosdns/rules/geosite_cn.txt","/etc/mosdns/rules/geosite_apple.txt","/etc/mosdns/rules/custom_direct.txt"] }
@@ -54,7 +58,7 @@ plugins:
     args:
       size: 8192
       lazy_cache_ttl: 86400
-  # 只处理 WLOC 两域名: A 指到网关, AAAA/HTTPS 置空; 其它类型走真实上游。
+  # 共享 MITM 精确域名: A 指到网关, AAAA/HTTPS 置空; 其它类型走真实上游。
   - tag: wloc_sequence
     type: sequence
     args:
@@ -74,6 +78,8 @@ plugins:
     args:
       - exec: $lazy_cache
       - exec: jump has_resp
+      - matches: qname $geosite_adblock
+        exec: goto wloc_sequence
       - matches: qname $geosite_wloc
         exec: goto wloc_sequence
       - matches: qname $geosite_cn

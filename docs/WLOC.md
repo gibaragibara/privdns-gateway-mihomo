@@ -17,13 +17,13 @@ gs-loc.apple.com / gs-loc-cn.apple.com
   → Apple
 ```
 
-MITM 只在 WLOC 开启时运行，也只接收上述两个精确域名。其它流量不会进入 mitmproxy。
+WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若 MITM 去广告同时开启，sidecar 也会接收其独立精确主机集；关闭 WLOC 后 Apple 定位域名立即恢复直连，但 sidecar 会继续服务去广告。
 
 ## 首次使用
 
 1. Telegram Bot 主菜单点 `📍 iOS 定位`，也可发送 `/wloc`；这个入口始终可重新打开。
-2. 点 `📜 安装专用 CA`，保存并安装 Bot 发来的 `PrivDNS-WLOC-CA.mobileconfig`。
-3. 在 iOS 打开 `设置 → 通用 → 关于本机 → 证书信任设置`，对 `mitmproxy` 开启完全信任。描述文件名称是 `PrivDNS WLOC CA`，但证书列表显示的是证书自身名称 `mitmproxy`。
+2. 点 `📜 安装共享 CA`，保存并安装 Bot 发来的 `PrivDNS-WLOC-CA.mobileconfig`。
+3. 在 iOS 打开 `设置 → 通用 → 关于本机 → 证书信任设置`，对 `mitmproxy` 开启完全信任。WLOC 与 MITM 去广告复用这张证书，已安装并信任时无需重复安装。
 4. 回到 Bot，直接点服务器预置地点。按钮只提交预置 ID，不要求发送 Telegram Location。
 5. 没有合适预置时可点 `✍️ 输入经纬度`，发送 WGS84 `纬度,经度`。
 6. 首次完全信任 CA 并设置目标后重启 iPhone，让 `locationd` 重新建立 TLS 会话并重新获取 WLOC 数据。
@@ -66,13 +66,13 @@ MITM 只在 WLOC 开启时运行，也只接收上述两个精确域名。其它
 
 ## 恢复真实定位
 
-在 WLOC 页面点 `♻️ 关闭并恢复真实定位`。系统会按以下顺序撤销：
+在 WLOC 页面点 `♻️ 关闭定位改写`。系统会按以下顺序撤销：
 
 1. 清空 WLOC DNS 域名集并重启 mosdns，清除服务端缓存。
-2. 从 mihomo 删除两个域名规则和本地 HTTP sidecar 出口。
-3. 停止并禁用 `pdg-wloc.service`。
+2. 从 mihomo 删除两个 Apple 域名规则。
+3. 如果 MITM 去广告也已关闭，才删除本地 HTTP sidecar 出口并停止 `pdg-wloc.service`；否则共享服务保持运行。
 
-专用 CA 描述文件会留在 iPhone，方便下次使用。长期不用时可在 iOS 的 VPN 与设备管理中删除该描述文件。
+共享 CA 描述文件会留在 iPhone，方便下次使用，也供去广告复用。长期不使用任何 MITM 功能时可在 iOS 的 VPN 与设备管理中删除该描述文件。
 
 ## iOS 缓存与验证
 
@@ -97,4 +97,4 @@ sudo pdg doctor
 sudo journalctl -u pdg-wloc -n 80 --no-pager
 ```
 
-`pdg doctor` 会检查 sidecar、CA、mosdns 域名集和 mihomo 精确域名规则。WLOC 关闭时，`pdg-wloc` 显示 `inactive` 是正常状态。
+`pdg doctor` 会分别检查 WLOC、去广告、共享 CA、mosdns 域名集和 mihomo 精确域名规则。WLOC 与去广告都关闭时，`pdg-wloc` 显示 `inactive` 是正常状态；仅 WLOC 关闭但去广告开启时，它应保持 `active`。

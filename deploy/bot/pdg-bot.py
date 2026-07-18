@@ -39,9 +39,14 @@ WLOC_SERVICE = "pdg-wloc"
 WLOC_OUTBOUND = "__pdg_wloc_mitm"
 WLOC_PORT = 9080
 WLOC_HOSTS = ("gs-loc.apple.com", "gs-loc-cn.apple.com")
+ADBLOCK_STATE = "/var/lib/pdg-wloc/adblock.json"
+ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
+ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
+ADBLOCK_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
+ADBLOCK_SYNC = "/opt/pdg-bot/sync_adblock.py"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
-_WLOC_CONFIG_LOCK = threading.Lock()
+_MITM_CONFIG_LOCK = threading.Lock()
 
 # ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
 _conn = None
@@ -102,7 +107,7 @@ MENU = {"inline_keyboard": [
     [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
     [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
     [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "📍 iOS 定位", "callback_data": "wloc"}],
-    [{"text": "🛠 运维", "callback_data": "nav:ops"}],
+    [{"text": "🛡 MITM 去广告", "callback_data": "adblock"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 EXIT_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回出口管理", "callback_data": "nav:exit"}],
@@ -116,6 +121,8 @@ DNS_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回 DNS 上游", "callback_
 WLOC_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回 WLOC", "callback_data": "wloc"}],
                                 [{"text": "📱 客户端", "callback_data": "nav:client"}],
                                 [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
+ADBLOCK_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
+                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}
 
 def _back_rows(kb):
     return [row[:] for row in kb["inline_keyboard"]]
@@ -218,6 +225,56 @@ def _wloc_presets():
 def _wloc_preset(preset_id):
     return next((p for p in _wloc_presets() if p["id"] == preset_id), None)
 
+def _adblock_default():
+    return {"enabled": False, "updated_at": None}
+
+def _adblock_load():
+    config = _adblock_default()
+    try:
+        raw = json.load(open(ADBLOCK_STATE))
+        if isinstance(raw, dict):
+            config.update(raw)
+    except Exception:  # noqa: BLE001
+        pass
+    config["enabled"] = bool(config.get("enabled"))
+    return config
+
+def _adblock_active(config=None):
+    return bool((config or _adblock_load()).get("enabled"))
+
+def _adblock_write_state(config):
+    os.makedirs(os.path.dirname(ADBLOCK_STATE), mode=0o755, exist_ok=True)
+    tmp = ADBLOCK_STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+        f.flush(); os.fsync(f.fileno())
+    try:
+        owner = pwd.getpwnam("pdg-wloc")
+        os.chown(tmp, owner.pw_uid, owner.pw_gid)
+    except (KeyError, PermissionError):
+        pass
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ADBLOCK_STATE)
+
+def _adblock_rules():
+    try:
+        payload = json.load(open(ADBLOCK_RULES))
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+    except Exception:  # noqa: BLE001
+        return {}
+
+def _adblock_hosts():
+    hosts = _adblock_rules().get("hosts", [])
+    return sorted({str(host).strip().lower() for host in hosts
+                   if re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                                   r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                                   str(host).strip().lower())})
+
+def _mitm_active():
+    return _wloc_active() or _adblock_active()
+
 def _nav(key):
     """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
     subs = {
@@ -234,9 +291,10 @@ def _nav(key):
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\n"
-                   "iOS 可生成私密 DNS 描述文件或使用服务端 WLOC:", [
+                   "iOS 可生成私密 DNS 描述文件，或使用共享 MITM 功能:", [
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"},
              {"text": "📍 iOS 虚拟定位", "callback_data": "wloc"}],
+            [{"text": "🛡 MITM 去广告", "callback_data": "adblock"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -260,23 +318,50 @@ def _wloc_page():
     else:
         target = "未设置"
     text = ("📍 <b>iOS WLOC 虚拟定位</b>\n"
-            "服务端只解密 Apple 的两个网络定位主机，普通流量仍走原有 5GPN。\n\n"
+            "WLOC 只改写 Apple 的两个网络定位主机，普通流量仍走原有 5GPN。\n\n"
             f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
-            f"MITM: {'🟢 运行中' if service else '⚪ 未运行'}\n"
-            f"专用 CA: {'✅ 已生成' if ca_ready else '未生成'}\n"
+            f"共享 MITM: {'🟢 运行中' if service else '⚪ 未运行'}\n"
+            f"共享 CA: {'✅ 已生成' if ca_ready else '未生成'}\n"
             f"目标: {target}\n\n"
-            "首次使用先安装专用 CA，并在 iOS 对名为 mitmproxy 的证书开启完全信任。"
+            "首次使用先安装共享 CA，并在 iOS 对名为 mitmproxy 的证书开启完全信任。"
             "常用地点按钮不会发送 Telegram Location。")
     rows = [
-        [{"text": "📜 安装专用 CA", "callback_data": "wloc_ca"}],
+        [{"text": "📜 安装共享 CA", "callback_data": "wloc_ca"}],
     ]
     for preset in _wloc_presets()[:12]:
         rows.append([{"text": "📌 " + preset["name"],
                       "callback_data": "wloc_use:" + preset["id"]}])
     rows.append([{"text": "✍️ 输入经纬度", "callback_data": "wloc_pick"}])
     if enabled:
-        rows.append([{"text": "♻️ 关闭并恢复真实定位", "callback_data": "wloc_off"}])
+        rows.append([{"text": "♻️ 关闭定位改写", "callback_data": "wloc_off"}])
     rows.extend([[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+    return text, {"inline_keyboard": rows}
+
+def _adblock_page():
+    enabled = _adblock_active()
+    service = sh(["systemctl", "is-active", WLOC_SERVICE]).stdout.strip() == "active"
+    payload = _adblock_rules()
+    stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
+    generated = str(payload.get("generated_at") or "未同步") if isinstance(payload, dict) else "未同步"
+    text = ("🛡 <b>MITM 声明式去广告</b>\n"
+            "复用共享 CA，只让已编译规则的精确主机进入共享 MITM。\n\n"
+            f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
+            f"共享 MITM: {'🟢 运行中' if service else '⚪ 未运行'}\n"
+            f"模块: {int(stats.get('source_count', 0) or 0)}  "
+            f"主机: {int(stats.get('host_count', 0) or 0)}  "
+            f"规则: {int(stats.get('rule_count', 0) or 0)}\n"
+            f"未移植脚本: {int(stats.get('unported_scripts', 0) or 0)}  "
+            f"未支持重写: {int(stats.get('unsupported_rewrites', 0) or 0)}\n"
+            f"最近同步: <code>{_esc(generated)}</code>\n\n"
+            "当前只执行 reject、mock、JSON 路径修改及受限 jq；不会执行远程 JavaScript。")
+    rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
+    if enabled:
+        rows.append([{"text": "🔄 同步规则", "callback_data": "adblock_refresh"}])
+        rows.append([{"text": "♻️ 关闭去广告", "callback_data": "adblock_off"}])
+    else:
+        rows.append([{"text": "✅ 同步并开启", "callback_data": "adblock_on"}])
+    rows.extend([[{"text": "📱 客户端", "callback_data": "nav:client"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
 
@@ -573,7 +658,8 @@ def _mihomo_config(c):
         else:
             proxies.append(_mihomo_proxy(o))
     wloc_enabled = _wloc_active()
-    if wloc_enabled:
+    adblock_hosts = _adblock_hosts() if _adblock_active() else []
+    if wloc_enabled or adblock_hosts:
         proxies.append({"name": WLOC_OUTBOUND, "type": "http",
                         "server": "127.0.0.1", "port": WLOC_PORT})
     providers = {}
@@ -584,8 +670,8 @@ def _mihomo_config(c):
         providers[name] = {"type": "file", "behavior": "classical", "path": _rule_provider_path(name, meta)}
     # Exact-domain rules must precede the server-IP reject rule. The phone sees the
     # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
-    rules = ([f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in WLOC_HOSTS]
-             if wloc_enabled else [])
+    mitm_hosts = (list(WLOC_HOSTS) if wloc_enabled else []) + adblock_hosts
+    rules = [f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts)]
     for r in c.get("route", {}).get("rules", []):
         target = r.get("outbound")
         if r.get("action") == "reject":
@@ -691,6 +777,14 @@ def _wloc_mosdns_ready():
     return all(marker in text for marker in
                ("tag: geosite_wloc", "tag: wloc_sequence", "qname $geosite_wloc"))
 
+def _adblock_mosdns_ready():
+    try:
+        text = open(MOSDNS_CONF).read()
+    except OSError:
+        return False
+    return all(marker in text for marker in
+               ("tag: geosite_adblock", "tag: wloc_sequence", "qname $geosite_adblock"))
+
 def _wloc_write_domains(enabled):
     os.makedirs(os.path.dirname(WLOC_DOMAINS), exist_ok=True)
     tmp = WLOC_DOMAINS + ".tmp"
@@ -701,15 +795,28 @@ def _wloc_write_domains(enabled):
     os.chmod(tmp, 0o644)
     os.replace(tmp, WLOC_DOMAINS)
 
-def _wloc_set_service(enabled):
+def _adblock_write_domains(enabled):
+    os.makedirs(os.path.dirname(ADBLOCK_DOMAINS), exist_ok=True)
+    tmp = ADBLOCK_DOMAINS + ".tmp"
+    with open(tmp, "w") as f:
+        if enabled:
+            hosts = _adblock_hosts()
+            if not hosts:
+                raise ValueError("去广告规则没有可路由的精确主机")
+            f.write("\n".join("full:" + host for host in hosts) + "\n")
+        f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, ADBLOCK_DOMAINS)
+
+def _mitm_set_service(enabled):
     if enabled:
         result = sh(["systemctl", "enable", "--now", WLOC_SERVICE])
         if result.returncode != 0 or not _svc_active(WLOC_SERVICE, need=2, max_polls=12):
-            return False, "WLOC MITM 服务启动失败: " + (result.stdout + result.stderr)[-300:]
+            return False, "共享 MITM 服务启动失败: " + (result.stdout + result.stderr)[-300:]
         return True, ""
     result = sh(["systemctl", "disable", "--now", WLOC_SERVICE])
     if result.returncode != 0:
-        return False, "WLOC MITM 服务停止失败: " + (result.stdout + result.stderr)[-300:]
+        return False, "共享 MITM 服务停止失败: " + (result.stdout + result.stderr)[-300:]
     return True, ""
 
 def _wloc_restart_mosdns():
@@ -725,15 +832,40 @@ def _wloc_restore_runtime(config):
     _wloc_write_domains(enabled)
     apply_sb(lambda c: None)
     _wloc_restart_mosdns()
-    _wloc_set_service(enabled)
+    _mitm_set_service(_mitm_active())
+
+def _adblock_restore_runtime(config):
+    enabled = _adblock_active(config)
+    _adblock_write_state(config)
+    try:
+        _adblock_write_domains(enabled)
+    except ValueError:
+        _adblock_write_domains(False)
+    apply_sb(lambda c: None)
+    _wloc_restart_mosdns()
+    _mitm_set_service(_mitm_active())
+
+def _adblock_sync_rules():
+    try:
+        result = sh(["python3", ADBLOCK_SYNC, "--sources", ADBLOCK_SOURCES,
+                     "--output", ADBLOCK_RULES])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"规则同步失败: {exc}"
+    if result.returncode != 0:
+        return False, "规则同步失败: " + (result.stdout + result.stderr)[-400:]
+    payload = _adblock_rules()
+    stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
+    if not _adblock_hosts() or not int(stats.get("rule_count", 0) or 0):
+        return False, "规则同步完成但没有可用的精确主机/声明式规则"
+    return True, stats
 
 def _wloc_ensure_ca():
     if os.path.exists(WLOC_CA) and os.path.getsize(WLOC_CA) > 0:
         return True, ""
-    keep_running = _wloc_active()
+    keep_running = _mitm_active()
     result = sh(["systemctl", "start", WLOC_SERVICE])
     if result.returncode != 0:
-        return False, "无法启动 WLOC MITM 生成 CA: " + (result.stdout + result.stderr)[-300:]
+        return False, "无法启动共享 MITM 生成 CA: " + (result.stdout + result.stderr)[-300:]
     for _ in range(30):
         if os.path.exists(WLOC_CA) and os.path.getsize(WLOC_CA) > 0:
             if not keep_running:
@@ -742,17 +874,17 @@ def _wloc_ensure_ca():
         time.sleep(0.2)
     if not keep_running:
         sh(["systemctl", "stop", WLOC_SERVICE])
-    return False, "WLOC MITM 已启动，但 6 秒内没有生成 CA"
+    return False, "共享 MITM 已启动，但 6 秒内没有生成 CA"
 
 def set_wloc(latitude, longitude, accuracy=25, label=None):
     lat, lon, acc = _wloc_validate(latitude, longitude, accuracy)
     label = " ".join(str(label or "").split())[:64] or None
     display_label = _esc(label) + " " if label else ""
-    with _WLOC_CONFIG_LOCK:
+    with _MITM_CONFIG_LOCK:
         if not _wloc_mosdns_ready():
             return False, "mosdns 尚未安装 WLOC 分支，请先运行 sudo pdg update"
         previous = _wloc_load()
-        ok, msg = _wloc_set_service(True)
+        ok, msg = _mitm_set_service(True)
         if not ok:
             return False, msg
         current = {"enabled": True, "latitude": lat, "longitude": lon, "accuracy": acc,
@@ -780,7 +912,7 @@ def set_wloc(latitude, longitude, accuracy=25, label=None):
                       "仅 gs-loc.apple.com / gs-loc-cn.apple.com 进入 MITM")
 
 def disable_wloc():
-    with _WLOC_CONFIG_LOCK:
+    with _MITM_CONFIG_LOCK:
         previous = _wloc_load()
         disabled = _wloc_default()
         _wloc_write_state(disabled)         # any in-flight MITM response becomes passthrough first
@@ -793,10 +925,80 @@ def disable_wloc():
         if not ok:
             _wloc_restore_runtime(previous)
             return False, msg
-        ok, msg = _wloc_set_service(False)
+        ok, msg = _mitm_set_service(_adblock_active())
         if not ok:
             return False, msg
-        return True, "✅ WLOC 已关闭，Apple 定位恢复原始直连"
+        return True, "✅ 定位改写已关闭，Apple 定位恢复原始直连；CA 和其它 MITM 功能已保留"
+
+def enable_adblock():
+    with _MITM_CONFIG_LOCK:
+        if not _adblock_mosdns_ready():
+            return False, "mosdns 尚未安装去广告分支，请先运行 sudo pdg update"
+        previous = _adblock_load()
+        backup = ADBLOCK_RULES + ".botbak"
+        had_rules = os.path.exists(ADBLOCK_RULES)
+        if had_rules:
+            shutil.copy2(ADBLOCK_RULES, backup)
+            os.chmod(backup, 0o600)
+        elif os.path.exists(backup):
+            os.unlink(backup)
+
+        def restore():
+            if had_rules and os.path.exists(backup):
+                os.replace(backup, ADBLOCK_RULES)
+            elif not had_rules and os.path.exists(ADBLOCK_RULES):
+                os.unlink(ADBLOCK_RULES)
+            _adblock_restore_runtime(previous)
+
+        ok, detail = _adblock_sync_rules()
+        if not ok:
+            if os.path.exists(backup):
+                os.unlink(backup)
+            return False, detail
+        ok, msg = _mitm_set_service(True)
+        if not ok:
+            restore()
+            return False, msg
+        current = {"enabled": True, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        _adblock_write_state(current)
+        ok, msg = apply_sb(lambda c: None)
+        if not ok:
+            restore()
+            return False, msg
+        try:
+            _adblock_write_domains(True)
+        except ValueError as exc:
+            restore()
+            return False, str(exc)
+        ok, msg = _wloc_restart_mosdns()
+        if not ok:
+            restore()
+            return False, msg
+        if os.path.exists(backup):
+            os.unlink(backup)
+        return True, ("✅ MITM 声明式去广告已开启: "
+                      f"{detail.get('source_count', 0)} 模块 / "
+                      f"{detail.get('host_count', 0)} 主机 / "
+                      f"{detail.get('rule_count', 0)} 规则\n"
+                      f"未执行远程脚本: {detail.get('unported_scripts', 0)}")
+
+def disable_adblock():
+    with _MITM_CONFIG_LOCK:
+        previous = _adblock_load()
+        _adblock_write_state(_adblock_default())
+        _adblock_write_domains(False)
+        ok, msg = _wloc_restart_mosdns()
+        if not ok:
+            _adblock_restore_runtime(previous)
+            return False, msg
+        ok, msg = apply_sb(lambda c: None)
+        if not ok:
+            _adblock_restore_runtime(previous)
+            return False, msg
+        ok, msg = _mitm_set_service(_wloc_active())
+        if not ok:
+            return False, msg
+        return True, "✅ MITM 去广告已关闭；WLOC 和 CA 不受影响"
 
 # 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
@@ -1940,15 +2142,15 @@ def _ios_profile(ssids=()):
 
 def _wloc_ca_der():
     if not os.path.exists(WLOC_CA):
-        raise FileNotFoundError("WLOC CA 尚未生成")
+        raise FileNotFoundError("共享 MITM CA 尚未生成")
     certificate = open(WLOC_CA, "rb").read()
     if certificate.startswith(b"-----BEGIN CERTIFICATE-----"):
         try:
             certificate = ssl.PEM_cert_to_DER_cert(certificate.decode("ascii"))
         except (UnicodeDecodeError, ValueError) as e:
-            raise ValueError("WLOC CA PEM 无法转换为 DER") from e
+            raise ValueError("共享 MITM CA PEM 无法转换为 DER") from e
     if not certificate:
-        raise ValueError("WLOC CA 为空")
+        raise ValueError("共享 MITM CA 为空")
     return certificate
 
 def _wloc_ca_profile():
@@ -1959,16 +2161,16 @@ def _wloc_ca_profile():
         "PayloadContent": [{
             "PayloadCertificateFileName": "PrivDNS-WLOC-CA.cer",
             "PayloadContent": certificate,
-            "PayloadDescription": "仅供自有 PrivDNS Gateway WLOC MITM 使用的根证书",
-            "PayloadDisplayName": "PrivDNS WLOC CA",
+            "PayloadDescription": "仅供自有 PrivDNS Gateway 共享 MITM 使用的根证书",
+            "PayloadDisplayName": "PrivDNS Shared MITM CA",
             "PayloadIdentifier": "com.privdns-gateway.wloc.ca.certificate",
             "PayloadOrganization": "PrivDNS Gateway",
             "PayloadType": "com.apple.security.root",
             "PayloadUUID": cert_uuid,
             "PayloadVersion": 1,
         }],
-        "PayloadDescription": "PrivDNS Gateway 服务端 WLOC 专用 CA",
-        "PayloadDisplayName": "PrivDNS WLOC CA",
+        "PayloadDescription": "PrivDNS Gateway 服务端共享 MITM CA",
+        "PayloadDisplayName": "PrivDNS Shared MITM CA",
         "PayloadIdentifier": "com.privdns-gateway.wloc.ca",
         "PayloadOrganization": "PrivDNS Gateway",
         "PayloadRemovalDisallowed": False,
@@ -1980,7 +2182,8 @@ def _wloc_ca_profile():
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False)
 
 # ── 配置备份 / 恢复 ──
-BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META, WLOC_PRESETS]
+BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META,
+                WLOC_PRESETS, ADBLOCK_SOURCES]
 RESTORE_MAP = {
     "etc/mihomo/state.json": STATE,
     "etc/mihomo/config.yaml": MIHOMO_CFG,
@@ -1988,6 +2191,7 @@ RESTORE_MAP = {
     "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
     "opt/pdg-bot/rulesets.json": RS_META,
     "etc/privdns-gateway/wloc-presets.json": WLOC_PRESETS,
+    "etc/privdns-gateway/adblock-sources.json": ADBLOCK_SOURCES,
 }
 
 def backup_blob():
@@ -2209,32 +2413,33 @@ def handle_cb(chat, mid, data, cb_id=None):
     if data == "wloc":
         state.pop(chat, None)
         title, kb = _wloc_page(); edit(chat, mid, title, kb); return
-    if data == "wloc_ca":
+    if data in ("wloc_ca", "adblock_ca"):
         state.pop(chat, None)
-        edit(chat, mid, "正在准备 WLOC 专用 CA…", WLOC_BACK)
+        back = WLOC_BACK if data == "wloc_ca" else ADBLOCK_BACK
+        edit(chat, mid, "正在准备共享 MITM CA…", back)
         def _wca():
             ok, msg = _wloc_ensure_ca()
             if not ok:
-                edit(chat, mid, "❌ " + msg, WLOC_BACK); return
+                edit(chat, mid, "❌ " + msg, back); return
             try:
                 cert = _wloc_ca_der()
                 fingerprint = hashlib.sha256(cert).hexdigest().upper()
                 send_document(chat, "PrivDNS-WLOC-CA.mobileconfig", _wloc_ca_profile(),
-                              "📜 PrivDNS WLOC 专用 CA\n"
+                              "📜 PrivDNS 共享 MITM CA\n"
                               f"SHA-256: <code>{fingerprint}</code>\n\n"
                               "安装后还要到 设置→通用→关于本机→证书信任设置，"
-                              "对 <b>mitmproxy</b> 开启完全信任。首次启用定位后请重启 iPhone。")
+                              "对 <b>mitmproxy</b> 开启完全信任。")
                 edit(chat, mid, "✅ CA 描述文件已发送。安装后请对 mitmproxy 开启完全信任，"
-                     "再选择目标位置并重启 iPhone。", WLOC_BACK)
+                     "已安装过同一 CA 则无需重复安装。", back)
             except Exception as e:  # noqa: BLE001
-                edit(chat, mid, f"❌ CA 描述文件生成失败: {e}", WLOC_BACK)
+                edit(chat, mid, f"❌ CA 描述文件生成失败: {e}", back)
         run_bg(_wca); return
     if data == "wloc_pick":
         state[chat] = "wloc_location"
         edit(chat, mid, "✍️ <b>输入目标经纬度</b>\n"
              "发送 WGS84 <code>纬度,经度</code>，例如 <code>22.303611,114.165</code>。\n"
              "不想把坐标发到 Telegram 时，请返回 WLOC 直接点服务器预置地点。\n"
-             "首次设置会启动 WLOC sidecar 并重载一次 DNS/代理；以后换坐标无需重启。/cancel 取消。",
+             "首次设置会启动共享 MITM sidecar 并重载一次 DNS/代理；以后换坐标无需重启。/cancel 取消。",
              WLOC_BACK); return
     if data.startswith("wloc_use:"):
         preset = _wloc_preset(data.split(":", 1)[1])
@@ -2247,10 +2452,10 @@ def handle_cb(chat, mid, data, cb_id=None):
             edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
         run_bg(_wp); return
     if data == "wloc_off":
-        edit(chat, mid, "确认关闭 WLOC 并恢复 Apple 原始定位？\n"
-             "会先撤销 DNS 劫持和 mihomo 规则，再停止 MITM sidecar。",
+        edit(chat, mid, "确认关闭定位改写并恢复 Apple 原始定位？\n"
+             "只撤销两个 Apple 定位域名；共享 CA 和其它 MITM 功能不受影响。",
              {"inline_keyboard": [
-                 [{"text": "确认关闭", "callback_data": "wloc_off_yes"}],
+                 [{"text": "确认关闭定位改写", "callback_data": "wloc_off_yes"}],
                  [{"text": "取消", "callback_data": "wloc"}]]}); return
     if data == "wloc_off_yes":
         edit(chat, mid, "正在安全撤销 WLOC…", WLOC_BACK)
@@ -2259,6 +2464,28 @@ def handle_cb(chat, mid, data, cb_id=None):
             title, kb = _wloc_page()
             edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
         run_bg(_woff); return
+    if data == "adblock":
+        state.pop(chat, None)
+        title, kb = _adblock_page(); edit(chat, mid, title, kb); return
+    if data in ("adblock_on", "adblock_refresh"):
+        edit(chat, mid, "正在下载并编译声明式去广告规则…", ADBLOCK_BACK)
+        def _adon():
+            ok, msg = enable_adblock()
+            title, kb = _adblock_page()
+            edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
+        run_bg(_adon); return
+    if data == "adblock_off":
+        edit(chat, mid, "确认关闭 MITM 去广告？\nWLOC 和共享 CA 不受影响。",
+             {"inline_keyboard": [
+                 [{"text": "确认关闭去广告", "callback_data": "adblock_off_yes"}],
+                 [{"text": "取消", "callback_data": "adblock"}]]}); return
+    if data == "adblock_off_yes":
+        edit(chat, mid, "正在撤销去广告域名和规则…", ADBLOCK_BACK)
+        def _adoff():
+            ok, msg = disable_adblock()
+            title, kb = _adblock_page()
+            edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
+        run_bg(_adoff); return
     if data == "setdot":
         state[chat] = "set_dot"
         edit(chat, mid, "发你的自定义 DoT 域名(先把它的 A 记录指向本机, Cloudflare 用「灰云 DNS only」)。\n"
@@ -2591,6 +2818,9 @@ def handle_text(chat, text, msg_id=None):
         if cmd == "/wloc":
             state.pop(chat, None)
             title, kb = _wloc_page(); send(chat, title, kb); return
+        if cmd == "/adblock":
+            state.pop(chat, None)
+            title, kb = _adblock_page(); send(chat, title, kb); return
         if cmd == "/ios":
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
@@ -2767,6 +2997,7 @@ def main():
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
         {"command": "wloc", "description": "iOS WLOC 虚拟定位"},
+        {"command": "adblock", "description": "MITM 声明式去广告"},
         {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})

@@ -43,8 +43,16 @@ with tempfile.TemporaryDirectory() as td:
     bot.MOSDNS_CONF = str(root / "mosdns.yaml")
     bot.WLOC_CA = str(root / "mitmproxy-ca-cert.cer")
     bot.WLOC_PRESETS = str(root / "wloc-presets.json")
+    bot.ADBLOCK_STATE = str(root / "adblock.json")
+    bot.ADBLOCK_RULES = str(root / "adblock-rules.json")
+    bot.ADBLOCK_DOMAINS = str(root / "adblock.txt")
+    bot.ADBLOCK_SOURCES = str(root / "adblock-sources.json")
     Path(bot.MOSDNS_CONF).write_text(
-        "tag: geosite_wloc\ntag: wloc_sequence\nqname $geosite_wloc\n", encoding="utf-8")
+        "tag: geosite_wloc\ntag: geosite_adblock\ntag: wloc_sequence\n"
+        "qname $geosite_wloc\nqname $geosite_adblock\n", encoding="utf-8")
+    bot._adblock_write_state(bot._adblock_default())
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({"hosts": [], "rules": []}),
+                                         encoding="utf-8")
     Path(bot.WLOC_PRESETS).write_text(json.dumps({"presets": [
         {"id": "p001", "name": "香港西九龙站", "latitude": 22.303611,
          "longitude": 114.165, "accuracy": 25},
@@ -73,6 +81,17 @@ with tempfile.TemporaryDirectory() as td:
     ]
     assert enabled["rules"][2].startswith("IP-CIDR,203.0.113.10/32,REJECT-DROP")
 
+    bot._wloc_write_state(bot._wloc_default())
+    bot._adblock_write_state({"enabled": True, "updated_at": "now"})
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": ["ads.example.com"],
+        "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
+    }), encoding="utf-8")
+    adblock_only = bot._mihomo_config(BASE)
+    assert adblock_only["rules"][0] == f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}"
+    assert not any("gs-loc" in rule for rule in adblock_only["rules"])
+    bot._adblock_write_state(bot._adblock_default())
+
     cert = b"\x30\x03\x02\x01\x01"
     Path(bot.WLOC_CA).write_text(bot.ssl.DER_cert_to_PEM_cert(cert), encoding="ascii")
     profile = plistlib.loads(bot._wloc_ca_profile())
@@ -94,7 +113,7 @@ with tempfile.TemporaryDirectory() as td:
     def dns():
         events.append(("mosdns", True)); return True, ""
 
-    bot._wloc_set_service = service
+    bot._mitm_set_service = service
     bot.apply_sb = apply
     bot._wloc_restart_mosdns = dns
 
@@ -118,6 +137,31 @@ with tempfile.TemporaryDirectory() as td:
     ok, _ = bot.disable_wloc()
     assert ok and bot._wloc_load()["enabled"] is False
     assert Path(bot.WLOC_DOMAINS).read_text() == ""
+    assert events == [("mosdns", True), ("mihomo", True), ("service", False)]
+
+    # Turning off location must keep the shared sidecar alive while adblock uses it.
+    bot._wloc_write_state(active)
+    bot._adblock_write_state({"enabled": True, "updated_at": "now"})
+    events.clear()
+    ok, _ = bot.disable_wloc()
+    assert ok
+    assert events == [("mosdns", True), ("mihomo", True), ("service", True)]
+    bot._adblock_write_state(bot._adblock_default())
+
+    bot._adblock_sync_rules = lambda: (True, {
+        "source_count": 1, "host_count": 1, "rule_count": 1,
+        "unported_scripts": 0,
+    })
+    events.clear()
+    ok, _ = bot.enable_adblock()
+    assert ok and bot._adblock_active()
+    assert Path(bot.ADBLOCK_DOMAINS).read_text() == "full:ads.example.com\n"
+    assert events == [("service", True), ("mihomo", True), ("mosdns", True)]
+
+    events.clear()
+    ok, _ = bot.disable_adblock()
+    assert ok and not bot._adblock_active()
+    assert Path(bot.ADBLOCK_DOMAINS).read_text() == ""
     assert events == [("mosdns", True), ("mihomo", True), ("service", False)]
 
     class Result:
@@ -148,6 +192,8 @@ source = BOT.read_text(encoding="utf-8")
 assert 'm.get("location") or m.get("venue", {}).get("location")' in source
 assert '"command": "wloc"' in source
 assert '"callback_data": "wloc"' in source.split("MENU =", 1)[1].split("BACK =", 1)[0]
+assert '"callback_data": "adblock"' in source.split("MENU =", 1)[1].split("BACK =", 1)[0]
 assert 'data.startswith("wloc_use:")' in source
+assert "只撤销两个 Apple 定位域名；共享 CA 和其它 MITM 功能不受影响" in source
 
 print("wloc-bot regression OK")

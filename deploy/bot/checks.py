@@ -10,6 +10,9 @@ DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
 WLOC_STATE = "/var/lib/pdg-wloc/wloc.json"
 WLOC_DOMAINS = "/etc/mosdns/rules/wloc.txt"
 WLOC_CA = "/var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer"
+ADBLOCK_STATE = "/var/lib/pdg-wloc/adblock.json"
+ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
+ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
 
 def _run(cmd, t=10):
     try:
@@ -186,13 +189,21 @@ def check_wloc():
     enabled = bool(config.get("enabled"))
     active = _run(["systemctl", "is-active", "pdg-wloc"])[1].strip() == "active"
     if not enabled:
-        return (("warn", "WLOC", "配置已关闭但 pdg-wloc 仍在运行") if active
-                else ("ok", "WLOC", "关闭(普通流量不经过 MITM)"))
+        try:
+            adblock_enabled = bool(json.load(open(ADBLOCK_STATE)).get("enabled"))
+        except Exception:  # noqa: BLE001
+            adblock_enabled = False
+        if active and not adblock_enabled:
+            return ("warn", "WLOC", "定位已关闭且无其它 MITM 功能，但共享服务仍在运行")
+        detail = "关闭(Apple 定位原始直连)"
+        if active and adblock_enabled:
+            detail += "；共享 MITM 由去广告使用"
+        return ("ok", "WLOC", detail)
     problems = []
     if not active:
         problems.append("pdg-wloc 未运行")
     if not os.path.exists(WLOC_CA):
-        problems.append("专用 CA 缺失")
+        problems.append("共享 CA 缺失")
     try:
         domains = set(open(WLOC_DOMAINS).read().split())
     except OSError:
@@ -211,6 +222,45 @@ def check_wloc():
     label = str(config.get("label") or "").strip()
     target = f"{config.get('latitude')},{config.get('longitude')}"
     return ("ok", "WLOC", f"开启 → {(label + ' ') if label else ''}{target}")
+
+def check_adblock():
+    try:
+        config = json.load(open(ADBLOCK_STATE))
+    except Exception:  # noqa: BLE001
+        config = {"enabled": False}
+    enabled = bool(config.get("enabled"))
+    active = _run(["systemctl", "is-active", "pdg-wloc"])[1].strip() == "active"
+    if not enabled:
+        return ("ok", "MITM 去广告", "关闭")
+    problems = []
+    try:
+        payload = json.load(open(ADBLOCK_RULES))
+        hosts = {str(host).lower() for host in payload.get("hosts", [])}
+        stats = payload.get("stats", {})
+    except Exception:  # noqa: BLE001
+        hosts, stats = set(), {}
+        problems.append("编译规则缺失/损坏")
+    if not active:
+        problems.append("共享 MITM 未运行")
+    if not os.path.exists(WLOC_CA):
+        problems.append("共享 CA 缺失")
+    try:
+        domains = set(open(ADBLOCK_DOMAINS).read().split())
+    except OSError:
+        domains = set()
+    if not hosts or domains != {"full:" + host for host in hosts}:
+        problems.append("mosdns 去广告域名集不同步")
+    try:
+        mihomo = open(MIHOMO_CFG).read()
+    except OSError:
+        mihomo = ""
+    if "__pdg_wloc_mitm" not in mihomo or any(host not in mihomo for host in hosts):
+        problems.append("mihomo 去广告规则缺失")
+    if problems:
+        return ("fail", "MITM 去广告", "; ".join(problems))
+    return ("ok", "MITM 去广告",
+            f"开启 → {stats.get('source_count', 0)} 模块 / "
+            f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 规则")
 
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():
@@ -359,8 +409,8 @@ def check_deep_upstreams():
 
 ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config,
-       check_wloc]
-ALERT = [check_services, check_dns, check_cert, check_wloc]  # healthcheck 用的轻量子集(运行期故障)
+       check_wloc, check_adblock]
+ALERT = [check_services, check_dns, check_cert, check_wloc, check_adblock]  # 运行期故障
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
 
