@@ -4,17 +4,31 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck source=lib/versions.sh
+source "$ROOT/lib/versions.sh"
 WORK="$(mktemp -d)"; PIDS=()
 trap 'for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
 fail(){ echo "[FAIL] $*" >&2; exit 1; }
 note(){ echo "[*] $*"; }
+
+case "$(uname -m)" in
+  x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;;
+  *) fail "不支持的架构: $(uname -m)" ;;
+esac
 
 if command -v mihomo >/dev/null; then
   MIHOMO="$(command -v mihomo)"
 elif [[ -x /Users/gibara/mihomo/mihomo ]]; then
   MIHOMO=/Users/gibara/mihomo/mihomo
 else
-  fail "找不到 mihomo；安装后重跑，或把 mihomo 放进 PATH"
+  note "下载锁定版 mihomo $MIHOMO_VER ($ARCH)…"
+  curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VER}/mihomo-linux-${ARCH}-v${MIHOMO_VER}.gz" \
+       -o "$WORK/mihomo.gz" || fail "mihomo 下载失败"
+  pdg_verify_sha256 "$WORK/mihomo.gz" "$(pdg_sha256 "mihomo-$ARCH")" \
+    "mihomo $MIHOMO_VER ($ARCH)" || fail "mihomo SHA256 校验失败"
+  gzip -dc "$WORK/mihomo.gz" > "$WORK/mihomo"
+  chmod +x "$WORK/mihomo"
+  MIHOMO="$WORK/mihomo"
 fi
 note "用 mihomo: $MIHOMO ($("$MIHOMO" -v 2>/dev/null | head -1))"
 

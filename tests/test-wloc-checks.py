@@ -22,6 +22,7 @@ with tempfile.TemporaryDirectory() as td:
     checks.ADBLOCK_STATE = str(root / "adblock.json")
     checks.ADBLOCK_RULES = str(root / "adblock-rules.json")
     checks.ADBLOCK_DOMAINS = str(root / "adblock.txt")
+    checks.ADBLOCK_DOMAIN_PROVIDER = str(root / "adblock-provider.yaml")
 
     active = False
 
@@ -60,12 +61,15 @@ with tempfile.TemporaryDirectory() as td:
     Path(checks.ADBLOCK_STATE).write_text(json.dumps({"enabled": True}), encoding="utf-8")
     Path(checks.ADBLOCK_RULES).write_text(json.dumps({
         "hosts": ["ads.example.com"],
-        "stats": {"source_count": 1, "host_count": 1, "rule_count": 2},
+        "stats": {"source_count": 1, "host_count": 1, "rule_count": 2,
+                  "domain_rule_count": 3},
     }), encoding="utf-8")
     Path(checks.ADBLOCK_DOMAINS).write_text("full:ads.example.com\n", encoding="utf-8")
+    Path(checks.ADBLOCK_DOMAIN_PROVIDER).write_text(
+        'payload:\n  - "DOMAIN-SUFFIX,tracker.example"\n', encoding="utf-8")
     Path(checks.MIHOMO_CFG).write_text(
-        "__pdg_wloc_mitm ads.example.com", encoding="utf-8")
+        "__pdg_wloc_mitm __pdg_adblock_reject ads.example.com", encoding="utf-8")
     assert checks.check_adblock() == (
-        "ok", "MITM 去广告", "开启 → 1 模块 / 1 主机 / 2 规则")
+        "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；普通 REJECT 3 条")
 
 print("wloc-checks regression OK")

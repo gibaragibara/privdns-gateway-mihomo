@@ -47,12 +47,30 @@ with tempfile.TemporaryDirectory() as td:
     bot.ADBLOCK_RULES = str(root / "adblock-rules.json")
     bot.ADBLOCK_DOMAINS = str(root / "adblock.txt")
     bot.ADBLOCK_SOURCES = str(root / "adblock-sources.json")
+    bot.ADBLOCK_DOMAIN_PROVIDER_FILE = str(root / "adblock-provider.yaml")
+    bot.MITM_LOCK_FILE = str(root / "pdg-mitm.lock")
     Path(bot.MOSDNS_CONF).write_text(
         "tag: geosite_wloc\ntag: geosite_adblock\ntag: wloc_sequence\n"
         "qname $geosite_wloc\nqname $geosite_adblock\n", encoding="utf-8")
     bot._adblock_write_state(bot._adblock_default())
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({"hosts": [], "rules": []}),
                                          encoding="utf-8")
+    Path(bot.ADBLOCK_SOURCES).write_text(json.dumps({
+        "sources": [
+            {"name": "插件一", "url": "https://example.com/one.lpx", "enabled": True},
+            {"name": "插件二", "url": "https://example.com/two.lpx", "enabled": True},
+        ],
+        "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
+    }), encoding="utf-8")
+    assert len(bot._adblock_module_sources()) == 2
+    bot._adblock_check_plugin = lambda _url: (True, {
+        "supported_rewrites": 2, "unported_scripts": 1,
+    })
+    ok, _ = bot.add_adblock_plugin("https://example.com/custom.lpx")
+    assert ok and len(bot._adblock_module_sources()) == 3
+    custom_id = bot._adblock_source_id("https://example.com/custom.lpx")
+    ok, _ = bot.delete_adblock_plugin(custom_id)
+    assert ok and len(bot._adblock_module_sources()) == 2
     Path(bot.WLOC_PRESETS).write_text(json.dumps({"presets": [
         {"id": "p001", "name": "香港西九龙站", "latitude": 22.303611,
          "longitude": 114.165, "accuracy": 25},
@@ -90,6 +108,35 @@ with tempfile.TemporaryDirectory() as td:
     adblock_only = bot._mihomo_config(BASE)
     assert adblock_only["rules"][0] == f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}"
     assert not any("gs-loc" in rule for rule in adblock_only["rules"])
+
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": ["ads.example.com"],
+        "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
+        "stats": {"domain_rule_count": 2},
+    }), encoding="utf-8")
+    Path(bot.ADBLOCK_DOMAIN_PROVIDER_FILE).write_text(
+        'payload:\n  - "DOMAIN-SUFFIX,tracker.example"\n', encoding="utf-8")
+    combined = bot._mihomo_config(BASE)
+    assert combined["rule-providers"][bot.ADBLOCK_DOMAIN_PROVIDER]["path"] == \
+        bot.ADBLOCK_DOMAIN_PROVIDER_FILE
+    assert combined["rules"][:2] == [
+        f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
+        f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
+    ]
+
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": [], "rules": [], "stats": {"domain_rule_count": 2},
+    }), encoding="utf-8")
+    normal_only = bot._mihomo_config(BASE)
+    assert bot.WLOC_OUTBOUND not in [proxy["name"] for proxy in normal_only["proxies"]]
+    assert normal_only["rules"][0] == f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT"
+    assert not bot._mitm_active()
+
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": ["ads.example.com"],
+        "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
+        "stats": {"domain_rule_count": 2},
+    }), encoding="utf-8")
     bot._adblock_write_state(bot._adblock_default())
 
     cert = b"\x30\x03\x02\x01\x01"
@@ -150,7 +197,7 @@ with tempfile.TemporaryDirectory() as td:
 
     bot._adblock_sync_rules = lambda: (True, {
         "source_count": 1, "host_count": 1, "rule_count": 1,
-        "unported_scripts": 0,
+        "domain_source_count": 1, "domain_rule_count": 2, "unported_scripts": 0,
     })
     events.clear()
     ok, _ = bot.enable_adblock()
@@ -182,6 +229,15 @@ with tempfile.TemporaryDirectory() as td:
     assert any(button.get("callback_data") == "wloc_use:p001"
                for row in edits[-1][1]["inline_keyboard"] for button in row)
 
+    bot.handle_cb(7, 9, "adblock_sources")
+    assert "MITM 插件管理" in edits[-1][0]
+    assert sum(button.get("callback_data", "").startswith("adsrc_del:")
+               for row in edits[-1][1]["inline_keyboard"] for button in row) == 2
+    bot.handle_cb(7, 9, "adsrc_add")
+    assert bot.state[7] == "adblock_add_source"
+    bot.handle_cb(7, 9, "adblock")
+    assert 7 not in bot.state
+
     events.clear()
     bot.handle_cb(7, 9, "wloc_use:p001")
     assert bot._wloc_load()["label"] == "香港西九龙站"
@@ -194,6 +250,7 @@ assert '"command": "wloc"' in source
 assert '"callback_data": "wloc"' in source.split("MENU =", 1)[1].split("BACK =", 1)[0]
 assert '"callback_data": "adblock"' in source.split("MENU =", 1)[1].split("BACK =", 1)[0]
 assert 'data.startswith("wloc_use:")' in source
+assert 'data.startswith("adsrc_del:")' in source
 assert "只撤销两个 Apple 定位域名；共享 CA 和其它 MITM 功能不受影响" in source
 
 print("wloc-bot regression OK")

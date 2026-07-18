@@ -66,6 +66,9 @@ mkdir -p "$WORK/rules"
 echo "qq.com" > "$WORK/rules/geosite_cn.txt"
 : > "$WORK/rules/geosite_apple.txt"
 : > "$WORK/rules/custom_direct.txt"
+: > "$WORK/rules/wloc.txt"
+: > "$WORK/rules/adblock.txt"
+: > "$WORK/rules/whatsapp.txt"
 echo "domain:unlktest.example" > "$WORK/rules/unlock.txt"
 
 # ── 渲染真实 config.yaml → 测试版(上游指 mock, 端口换高位, 去掉 DoT server 省证书)──

@@ -13,6 +13,7 @@ WLOC_CA = "/var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer"
 ADBLOCK_STATE = "/var/lib/pdg-wloc/adblock.json"
 ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
 ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
+ADBLOCK_DOMAIN_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"
 
 def _run(cmd, t=10):
     try:
@@ -231,7 +232,7 @@ def check_adblock():
     enabled = bool(config.get("enabled"))
     active = _run(["systemctl", "is-active", "pdg-wloc"])[1].strip() == "active"
     if not enabled:
-        return ("ok", "MITM 去广告", "关闭")
+        return ("ok", "去广告", "关闭")
     problems = []
     try:
         payload = json.load(open(ADBLOCK_RULES))
@@ -240,27 +241,38 @@ def check_adblock():
     except Exception:  # noqa: BLE001
         hosts, stats = set(), {}
         problems.append("编译规则缺失/损坏")
-    if not active:
+    rewrite_count = int(stats.get("rule_count", 0) or 0)
+    if bool(hosts) != bool(rewrite_count):
+        problems.append("MITM 主机与重写规则不同步")
+    if hosts and not active:
         problems.append("共享 MITM 未运行")
-    if not os.path.exists(WLOC_CA):
+    if hosts and not os.path.exists(WLOC_CA):
         problems.append("共享 CA 缺失")
     try:
         domains = set(open(ADBLOCK_DOMAINS).read().split())
     except OSError:
         domains = set()
-    if not hosts or domains != {"full:" + host for host in hosts}:
+    if hosts and domains != {"full:" + host for host in hosts}:
         problems.append("mosdns 去广告域名集不同步")
+    if not hosts and domains:
+        problems.append("mosdns 去广告域名集未清空")
+    domain_rules = int(stats.get("domain_rule_count", 0) or 0)
+    if not domain_rules or not os.path.exists(ADBLOCK_DOMAIN_PROVIDER):
+        problems.append("普通 REJECT provider 缺失")
     try:
         mihomo = open(MIHOMO_CFG).read()
     except OSError:
         mihomo = ""
-    if "__pdg_wloc_mitm" not in mihomo or any(host not in mihomo for host in hosts):
+    if hosts and ("__pdg_wloc_mitm" not in mihomo or any(host not in mihomo for host in hosts)):
         problems.append("mihomo 去广告规则缺失")
+    if domain_rules and "__pdg_adblock_reject" not in mihomo:
+        problems.append("mihomo 普通 REJECT 规则缺失")
     if problems:
-        return ("fail", "MITM 去广告", "; ".join(problems))
-    return ("ok", "MITM 去广告",
+        return ("fail", "去广告", "; ".join(problems))
+    return ("ok", "去广告",
             f"开启 → {stats.get('source_count', 0)} 模块 / "
-            f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 规则")
+            f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 重写；"
+            f"普通 REJECT {stats.get('domain_rule_count', 0)} 条")
 
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():

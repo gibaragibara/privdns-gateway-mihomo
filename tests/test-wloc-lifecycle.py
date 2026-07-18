@@ -10,6 +10,7 @@ unit = (ROOT / "deploy/wloc/pdg-wloc.service").read_text(encoding="utf-8")
 addon = (ROOT / "deploy/wloc/wloc_mitm.py").read_text(encoding="utf-8")
 adblock_addon = (ROOT / "deploy/mitm/adblock_mitm.py").read_text(encoding="utf-8")
 bot = (ROOT / "deploy/bot/pdg-bot.py").read_text(encoding="utf-8")
+scheduled = (ROOT / "deploy/bot/scheduled-update.sh").read_text(encoding="utf-8")
 
 for marker in ("mitmproxy", "wloc_mitm.py", "migrate_wloc.py", "pdg-wloc.service",
                "/var/lib/pdg-wloc/wloc.json", "/etc/mosdns/rules/wloc.txt",
@@ -60,7 +61,11 @@ assert 'CONFIG_PATH = "/var/lib/pdg-wloc/wloc.json"' in addon
 assert "--scripts /opt/pdg-bot/wloc_mitm.py --scripts /opt/pdg-bot/adblock_mitm.py" in unit
 assert 'STATE_PATH = "/var/lib/pdg-wloc/adblock.json"' in adblock_addon
 assert 'RULES_PATH = "/var/lib/pdg-wloc/adblock-rules.json"' in adblock_addon
-assert "_mitm_set_service(_adblock_active())" in bot
-assert "_mitm_set_service(_wloc_active())" in bot
+assert 'ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"' in bot
+assert "--domain-output" in bot
+assert "_mitm_set_service(_mitm_active())" in bot
+assert "_mitm_set_service(_wloc_active())" in bot or "_mitm_set_service(_mitm_active())" in bot
+assert "refresh_adblock" in scheduled, "daily timer must refresh REJECT and MITM adblock sources"
+assert "adblock_sources" in bot and "adblock_add_source" in bot and "adsrc_del:" in bot
 
 print("wloc-lifecycle regression OK")

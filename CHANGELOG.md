@@ -5,7 +5,8 @@
 ## 2026-07-19 — 未发布(共享 MITM 去广告)
 
 - WLOC 与去广告改为独立开关并共享同一个本地 mitmproxy sidecar 和 CA；关闭 WLOC 只恢复两个 Apple 定位域名直连，去广告开启时不会再停止 MITM。
-- Telegram Bot 新增 `/adblock` 与 **MITM 去广告**菜单，可同步并编译公开 Loon/Egern 模块中的声明式 reject、mock、JSON、受限 jq、正则替换及响应头规则。
+- Telegram Bot 新增 `/adblock` 与 **去广告**菜单：同步原 Egern 配置中的 3 个普通 REJECT 规则源，并编译公开 Loon/Egern 模块中的声明式 reject、mock、JSON、受限 jq、正则替换及响应头规则。
+- 新增 MITM 插件管理：按单个 Kelee/Loon 插件删除、通过 HTTPS URL 添加；普通 REJECT 与 MITM 来源统一由每日 timer 刷新，失败保留旧缓存。
 - 规则只为模块声明的精确主机注入 mosdns/mihomo 分支；远程 JavaScript、外部 jq、ProtoBuf 脚本及通配主机不会执行或导入。
 - 安装、tag-only 更新、快照/回滚、健康检查、mosdns 幂等迁移和 CI 已接入共享生命周期。
 

@@ -11,7 +11,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, hashlib, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, contextlib, fcntl, hashlib, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
@@ -44,9 +44,13 @@ ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
 ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
 ADBLOCK_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
 ADBLOCK_SYNC = "/opt/pdg-bot/sync_adblock.py"
+ADBLOCK_DOMAIN_PROVIDER = "__pdg_adblock_reject"
+ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"
+MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
-_MITM_CONFIG_LOCK = threading.Lock()
+_MITM_CONFIG_THREAD_LOCK = threading.RLock()
+_MITM_CONFIG_LOCAL = threading.local()
 
 # ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
 _conn = None
@@ -107,7 +111,7 @@ MENU = {"inline_keyboard": [
     [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
     [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
     [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "📍 iOS 定位", "callback_data": "wloc"}],
-    [{"text": "🛡 MITM 去广告", "callback_data": "adblock"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
+    [{"text": "🛡 去广告", "callback_data": "adblock"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 EXIT_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回出口管理", "callback_data": "nav:exit"}],
@@ -272,8 +276,104 @@ def _adblock_hosts():
                                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
                                    str(host).strip().lower())})
 
+def _adblock_source_config():
+    try:
+        config = json.load(open(ADBLOCK_SOURCES))
+    except Exception:  # noqa: BLE001
+        return {"sources": [], "domain_sources": []}
+    if not isinstance(config, dict):
+        return {"sources": [], "domain_sources": []}
+    for key in ("sources", "domain_sources"):
+        if not isinstance(config.get(key), list):
+            config[key] = []
+    return config
+
+def _adblock_write_source_config(config):
+    directory = os.path.dirname(ADBLOCK_SOURCES)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        stat = os.stat(ADBLOCK_SOURCES)
+    except OSError:
+        stat = None
+    fd, temporary = tempfile.mkstemp(prefix=".adblock-sources-", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush(); os.fsync(file.fileno())
+        os.chmod(temporary, (stat.st_mode & 0o777) if stat else 0o600)
+        if stat:
+            os.chown(temporary, stat.st_uid, stat.st_gid)
+        os.replace(temporary, ADBLOCK_SOURCES)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+def _adblock_source_id(url):
+    return hashlib.sha256(str(url).encode()).hexdigest()[:12]
+
+def _adblock_module_sources(config=None):
+    config = config or _adblock_source_config()
+    result = []
+    for item in config.get("sources", []):
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        result.append({"id": _adblock_source_id(url), "name": str(item.get("name") or url)[:80],
+                       "url": url})
+    return result
+
+def _adblock_plugin_url(url):
+    url = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+            or parsed.password or parsed.fragment or len(url) > 2000):
+        raise ValueError("只接受不含账号、片段的 HTTPS 插件 URL")
+    return url
+
+def _adblock_plugin_name(url):
+    parsed = urllib.parse.urlsplit(url)
+    name = urllib.parse.unquote(os.path.basename(parsed.path)).rsplit(".", 1)[0]
+    name = " ".join(name.replace("_", " ").replace("-", " ").split())
+    return (name or parsed.hostname or "自定义插件")[:48]
+
+def _adblock_check_plugin(url):
+    result = sh(["python3", ADBLOCK_SYNC, "--check-module-url", url])
+    if result.returncode != 0:
+        return False, "插件校验失败: " + (result.stdout + result.stderr)[-300:]
+    try:
+        return True, json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return False, "插件校验器返回了无效结果"
+
 def _mitm_active():
-    return _wloc_active() or _adblock_active()
+    return _wloc_active() or (_adblock_active() and bool(_adblock_hosts()))
+
+@contextlib.contextmanager
+def _mitm_config_lock():
+    with _MITM_CONFIG_THREAD_LOCK:
+        depth = getattr(_MITM_CONFIG_LOCAL, "depth", 0)
+        if depth == 0:
+            os.makedirs(os.path.dirname(MITM_LOCK_FILE), mode=0o755, exist_ok=True)
+            descriptor = os.open(MITM_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except Exception:
+                os.close(descriptor)
+                raise
+            _MITM_CONFIG_LOCAL.descriptor = descriptor
+        _MITM_CONFIG_LOCAL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _MITM_CONFIG_LOCAL.depth -= 1
+            if _MITM_CONFIG_LOCAL.depth == 0:
+                descriptor = _MITM_CONFIG_LOCAL.descriptor
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+                del _MITM_CONFIG_LOCAL.descriptor
 
 def _nav(key):
     """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
@@ -294,7 +394,7 @@ def _nav(key):
                    "iOS 可生成私密 DNS 描述文件，或使用共享 MITM 功能:", [
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"},
              {"text": "📍 iOS 虚拟定位", "callback_data": "wloc"}],
-            [{"text": "🛡 MITM 去广告", "callback_data": "adblock"}],
+            [{"text": "🛡 去广告", "callback_data": "adblock"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -344,24 +444,41 @@ def _adblock_page():
     payload = _adblock_rules()
     stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
     generated = str(payload.get("generated_at") or "未同步") if isinstance(payload, dict) else "未同步"
-    text = ("🛡 <b>MITM 声明式去广告</b>\n"
-            "复用共享 CA，只让已编译规则的精确主机进入共享 MITM。\n\n"
+    text = ("🛡 <b>服务端去广告</b>\n"
+            "普通 REJECT 规则由 mihomo 直接拦截；响应改写复用共享 CA。\n\n"
             f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
             f"共享 MITM: {'🟢 运行中' if service else '⚪ 未运行'}\n"
-            f"模块: {int(stats.get('source_count', 0) or 0)}  "
+            f"MITM 模块: {int(stats.get('source_count', 0) or 0)}  "
             f"主机: {int(stats.get('host_count', 0) or 0)}  "
-            f"规则: {int(stats.get('rule_count', 0) or 0)}\n"
+            f"重写: {int(stats.get('rule_count', 0) or 0)}\n"
+            f"普通规则源: {int(stats.get('domain_source_count', 0) or 0)}  "
+            f"REJECT: {int(stats.get('domain_rule_count', 0) or 0)}\n"
             f"未移植脚本: {int(stats.get('unported_scripts', 0) or 0)}  "
             f"未支持重写: {int(stats.get('unsupported_rewrites', 0) or 0)}\n"
             f"最近同步: <code>{_esc(generated)}</code>\n\n"
-            "当前只执行 reject、mock、JSON 路径修改及受限 jq；不会执行远程 JavaScript。")
+            "自动更新: 每日 04:30（含普通 REJECT 与 MITM 插件）\n\n"
+            "MITM 只执行 reject、mock、JSON 路径修改及受限 jq；不会执行远程 JavaScript。")
     rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
+    rows.append([{"text": "🧩 MITM 插件管理", "callback_data": "adblock_sources"}])
     if enabled:
         rows.append([{"text": "🔄 同步规则", "callback_data": "adblock_refresh"}])
         rows.append([{"text": "♻️ 关闭去广告", "callback_data": "adblock_off"}])
     else:
         rows.append([{"text": "✅ 同步并开启", "callback_data": "adblock_on"}])
     rows.extend([[{"text": "📱 客户端", "callback_data": "nav:client"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+    return text, {"inline_keyboard": rows}
+
+def _adblock_sources_page():
+    sources = _adblock_module_sources()
+    text = ("🧩 <b>MITM 插件管理</b>\n"
+            f"当前: <b>{len(sources)}</b> 个。删除以单个 Kelee/Loon 插件为单位；"
+            "普通 REJECT 规则不在这里删除。")
+    rows = [[{"text": "➕ 添加插件 URL", "callback_data": "adsrc_add"}]]
+    for source in sources[:64]:
+        label = " ".join(source["name"].split())[:42] or source["url"][:42]
+        rows.append([{"text": "🗑 " + label, "callback_data": "adsrc_del:" + source["id"]}])
+    rows.extend([[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
 
@@ -668,10 +785,17 @@ def _mihomo_config(c):
         if not name:
             continue
         providers[name] = {"type": "file", "behavior": "classical", "path": _rule_provider_path(name, meta)}
+    adblock_stats = _adblock_rules().get("stats", {}) if _adblock_active() else {}
+    domain_rule_count = int(adblock_stats.get("domain_rule_count", 0) or 0)
+    if domain_rule_count:
+        providers[ADBLOCK_DOMAIN_PROVIDER] = {
+            "type": "file", "behavior": "classical", "path": ADBLOCK_DOMAIN_PROVIDER_FILE,
+        }
     # Exact-domain rules must precede the server-IP reject rule. The phone sees the
     # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
     mitm_hosts = (list(WLOC_HOSTS) if wloc_enabled else []) + adblock_hosts
-    rules = [f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts)]
+    rules = ([f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT"] if domain_rule_count else [])
+    rules.extend(f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts))
     for r in c.get("route", {}).get("rules", []):
         target = r.get("outbound")
         if r.get("action") == "reject":
@@ -801,9 +925,8 @@ def _adblock_write_domains(enabled):
     with open(tmp, "w") as f:
         if enabled:
             hosts = _adblock_hosts()
-            if not hosts:
-                raise ValueError("去广告规则没有可路由的精确主机")
-            f.write("\n".join("full:" + host for host in hosts) + "\n")
+            if hosts:
+                f.write("\n".join("full:" + host for host in hosts) + "\n")
         f.flush(); os.fsync(f.fileno())
     os.chmod(tmp, 0o644)
     os.replace(tmp, ADBLOCK_DOMAINS)
@@ -848,15 +971,20 @@ def _adblock_restore_runtime(config):
 def _adblock_sync_rules():
     try:
         result = sh(["python3", ADBLOCK_SYNC, "--sources", ADBLOCK_SOURCES,
-                     "--output", ADBLOCK_RULES])
+                     "--output", ADBLOCK_RULES,
+                     "--domain-output", ADBLOCK_DOMAIN_PROVIDER_FILE])
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"规则同步失败: {exc}"
     if result.returncode != 0:
         return False, "规则同步失败: " + (result.stdout + result.stderr)[-400:]
     payload = _adblock_rules()
     stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
-    if not _adblock_hosts() or not int(stats.get("rule_count", 0) or 0):
-        return False, "规则同步完成但没有可用的精确主机/声明式规则"
+    hosts = _adblock_hosts()
+    rewrite_count = int(stats.get("rule_count", 0) or 0)
+    if bool(hosts) != bool(rewrite_count):
+        return False, "MITM 精确主机和声明式规则不一致"
+    if not int(stats.get("domain_rule_count", 0) or 0) or not os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
+        return False, "规则同步完成但没有可用的普通 REJECT 规则"
     return True, stats
 
 def _wloc_ensure_ca():
@@ -880,7 +1008,7 @@ def set_wloc(latitude, longitude, accuracy=25, label=None):
     lat, lon, acc = _wloc_validate(latitude, longitude, accuracy)
     label = " ".join(str(label or "").split())[:64] or None
     display_label = _esc(label) + " " if label else ""
-    with _MITM_CONFIG_LOCK:
+    with _mitm_config_lock():
         if not _wloc_mosdns_ready():
             return False, "mosdns 尚未安装 WLOC 分支，请先运行 sudo pdg update"
         previous = _wloc_load()
@@ -912,7 +1040,7 @@ def set_wloc(latitude, longitude, accuracy=25, label=None):
                       "仅 gs-loc.apple.com / gs-loc-cn.apple.com 进入 MITM")
 
 def disable_wloc():
-    with _MITM_CONFIG_LOCK:
+    with _mitm_config_lock():
         previous = _wloc_load()
         disabled = _wloc_default()
         _wloc_write_state(disabled)         # any in-flight MITM response becomes passthrough first
@@ -925,37 +1053,50 @@ def disable_wloc():
         if not ok:
             _wloc_restore_runtime(previous)
             return False, msg
-        ok, msg = _mitm_set_service(_adblock_active())
+        ok, msg = _mitm_set_service(_mitm_active())
         if not ok:
             return False, msg
         return True, "✅ 定位改写已关闭，Apple 定位恢复原始直连；CA 和其它 MITM 功能已保留"
 
 def enable_adblock():
-    with _MITM_CONFIG_LOCK:
+    with _mitm_config_lock():
         if not _adblock_mosdns_ready():
             return False, "mosdns 尚未安装去广告分支，请先运行 sudo pdg update"
         previous = _adblock_load()
         backup = ADBLOCK_RULES + ".botbak"
+        provider_backup = ADBLOCK_DOMAIN_PROVIDER_FILE + ".botbak"
         had_rules = os.path.exists(ADBLOCK_RULES)
+        had_provider = os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE)
         if had_rules:
             shutil.copy2(ADBLOCK_RULES, backup)
             os.chmod(backup, 0o600)
         elif os.path.exists(backup):
             os.unlink(backup)
+        if had_provider:
+            shutil.copy2(ADBLOCK_DOMAIN_PROVIDER_FILE, provider_backup)
+            os.chmod(provider_backup, 0o600)
+        elif os.path.exists(provider_backup):
+            os.unlink(provider_backup)
 
-        def restore():
+        def restore_files():
             if had_rules and os.path.exists(backup):
                 os.replace(backup, ADBLOCK_RULES)
             elif not had_rules and os.path.exists(ADBLOCK_RULES):
                 os.unlink(ADBLOCK_RULES)
+            if had_provider and os.path.exists(provider_backup):
+                os.replace(provider_backup, ADBLOCK_DOMAIN_PROVIDER_FILE)
+            elif not had_provider and os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
+                os.unlink(ADBLOCK_DOMAIN_PROVIDER_FILE)
+
+        def restore():
+            restore_files()
             _adblock_restore_runtime(previous)
 
         ok, detail = _adblock_sync_rules()
         if not ok:
-            if os.path.exists(backup):
-                os.unlink(backup)
+            restore_files()
             return False, detail
-        ok, msg = _mitm_set_service(True)
+        ok, msg = _mitm_set_service(_wloc_active() or bool(_adblock_hosts()))
         if not ok:
             restore()
             return False, msg
@@ -974,16 +1115,19 @@ def enable_adblock():
         if not ok:
             restore()
             return False, msg
-        if os.path.exists(backup):
-            os.unlink(backup)
-        return True, ("✅ MITM 声明式去广告已开启: "
+        for path in (backup, provider_backup):
+            if os.path.exists(path):
+                os.unlink(path)
+        return True, ("✅ 服务端去广告已开启: "
                       f"{detail.get('source_count', 0)} 模块 / "
                       f"{detail.get('host_count', 0)} 主机 / "
                       f"{detail.get('rule_count', 0)} 规则\n"
+                      f"普通 REJECT: {detail.get('domain_source_count', 0)} 源 / "
+                      f"{detail.get('domain_rule_count', 0)} 规则\n"
                       f"未执行远程脚本: {detail.get('unported_scripts', 0)}")
 
 def disable_adblock():
-    with _MITM_CONFIG_LOCK:
+    with _mitm_config_lock():
         previous = _adblock_load()
         _adblock_write_state(_adblock_default())
         _adblock_write_domains(False)
@@ -995,10 +1139,71 @@ def disable_adblock():
         if not ok:
             _adblock_restore_runtime(previous)
             return False, msg
-        ok, msg = _mitm_set_service(_wloc_active())
+        ok, msg = _mitm_set_service(_mitm_active())
         if not ok:
             return False, msg
-        return True, "✅ MITM 去广告已关闭；WLOC 和 CA 不受影响"
+        return True, "✅ 去广告已关闭；WLOC 和 CA 不受影响"
+
+def refresh_adblock():
+    with _mitm_config_lock():
+        if _adblock_active():
+            return enable_adblock()
+        ok, detail = _adblock_sync_rules()
+        if not ok:
+            return False, detail
+        return True, (f"去广告未开启，已更新缓存（普通 REJECT {detail.get('domain_rule_count', 0)} 条）")
+
+def add_adblock_plugin(url):
+    try:
+        url = _adblock_plugin_url(url)
+    except ValueError as exc:
+        return False, str(exc)
+    ok, detail = _adblock_check_plugin(url)
+    if not ok:
+        return False, detail
+    with _mitm_config_lock():
+        config = _adblock_source_config()
+        sources = _adblock_module_sources(config)
+        if any(item["url"] == url for item in sources):
+            return False, "这个插件 URL 已存在"
+        if len(sources) >= 64:
+            return False, "MITM 插件最多 64 个"
+        previous = json.loads(json.dumps(config))
+        config["sources"].append({
+            "name": _adblock_plugin_name(url), "url": url, "enabled": True,
+        })
+        _adblock_write_source_config(config)
+        if _adblock_active():
+            refreshed, message = enable_adblock()
+            if not refreshed:
+                _adblock_write_source_config(previous)
+                return False, message
+        return True, (f"✅ 已添加插件 {_adblock_plugin_name(url)}；"
+                      f"声明式重写 {detail.get('supported_rewrites', 0)} 条，"
+                      f"未执行脚本 {detail.get('unported_scripts', 0)} 条")
+
+def delete_adblock_plugin(source_id):
+    with _mitm_config_lock():
+        config = _adblock_source_config()
+        previous = json.loads(json.dumps(config))
+        removed = None
+        kept = []
+        for item in config.get("sources", []):
+            url = str(item.get("url") or "") if isinstance(item, dict) else ""
+            if removed is None and _adblock_source_id(url) == source_id:
+                removed = item
+            else:
+                kept.append(item)
+        if removed is None:
+            return False, "插件不存在或已删除"
+        config["sources"] = kept
+        _adblock_write_source_config(config)
+        if _adblock_active():
+            refreshed, message = enable_adblock()
+            if not refreshed:
+                _adblock_write_source_config(previous)
+                return False, message
+        return True, "✅ 已删除插件 " + str(removed.get("name") or removed.get("url") or "")
 
 # 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
@@ -2467,15 +2672,43 @@ def handle_cb(chat, mid, data, cb_id=None):
     if data == "adblock":
         state.pop(chat, None)
         title, kb = _adblock_page(); edit(chat, mid, title, kb); return
+    if data == "adblock_sources":
+        state.pop(chat, None)
+        title, kb = _adblock_sources_page(); edit(chat, mid, title, kb); return
+    if data == "adsrc_add":
+        state[chat] = "adblock_add_source"
+        edit(chat, mid, "发送一个 HTTPS Kelee/Loon/Egern 插件 URL。\n"
+             "添加前会校验声明式规则；远程 JavaScript 和 ProtoBuf 不会执行。/cancel 取消。",
+             ADBLOCK_BACK); return
+    if data.startswith("adsrc_del:"):
+        source_id = data.split(":", 1)[1]
+        source = next((item for item in _adblock_module_sources()
+                       if item["id"] == source_id), None)
+        if not source:
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, "插件不存在或已删除。\n\n" + title, kb); return
+        edit(chat, mid, f"确认删除 MITM 插件 <b>{_esc(source['name'])}</b>？\n"
+             "若去广告已开启，会立即重新编译并应用剩余插件。",
+             {"inline_keyboard": [
+                 [{"text": "确认删除", "callback_data": "adsrc_del_yes:" + source_id}],
+                 [{"text": "取消", "callback_data": "adblock_sources"}]]}); return
+    if data.startswith("adsrc_del_yes:"):
+        source_id = data.split(":", 1)[1]
+        edit(chat, mid, "正在删除并重新编译去广告规则…", ADBLOCK_BACK)
+        def _adsrc_delete(sid=source_id):
+            ok, msg = delete_adblock_plugin(sid)
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
+        run_bg(_adsrc_delete); return
     if data in ("adblock_on", "adblock_refresh"):
-        edit(chat, mid, "正在下载并编译声明式去广告规则…", ADBLOCK_BACK)
+        edit(chat, mid, "正在下载并编译普通 REJECT 与 MITM 规则…", ADBLOCK_BACK)
         def _adon():
             ok, msg = enable_adblock()
             title, kb = _adblock_page()
             edit(chat, mid, (("" if ok else "❌ ") + msg + "\n\n" + title), kb)
         run_bg(_adon); return
     if data == "adblock_off":
-        edit(chat, mid, "确认关闭 MITM 去广告？\nWLOC 和共享 CA 不受影响。",
+        edit(chat, mid, "确认关闭去广告？\nWLOC 和共享 CA 不受影响。",
              {"inline_keyboard": [
                  [{"text": "确认关闭去广告", "callback_data": "adblock_off_yes"}],
                  [{"text": "取消", "callback_data": "adblock"}]]}); return
@@ -2727,11 +2960,15 @@ def handle_cb(chat, mid, data, cb_id=None):
             edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK)
         run_bg(_rst); return
     if data == "updgeo":
-        edit(chat, mid, "正在更新 geosite + 规则集…", OPS_BACK)
+        edit(chat, mid, "正在更新 geosite + 分流规则集 + 去广告规则…", OPS_BACK)
         def _geo():
-            r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
-            edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0
-                             else "geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:]), OPS_BACK)
+            r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets(); ad_ok, ad_msg = refresh_adblock()
+            if r.returncode == 0 and ad_ok:
+                msg = f"✅ geosite 已更新; 分流规则集刷新 {n} 个\n{ad_msg}"
+            else:
+                msg = (("geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:])
+                       if r.returncode != 0 else ("去广告刷新失败: " + ad_msg))
+            edit(chat, mid, msg, OPS_BACK)
         run_bg(_geo); return
     if data.startswith("delx:"):
         tag = data[5:]
@@ -2841,7 +3078,9 @@ def handle_text(chat, text, msg_id=None):
             ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send_plain(chat, "✅ 已重启" if ok else "重启失败"); return
         if cmd == "/update":
             send_plain(chat, "更新中…"); r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
-            send_plain(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
+            ad_ok, ad_msg = refresh_adblock()
+            send_plain(chat, (f"✅ 完成，分流规则集刷新 {n} 个\n{ad_msg}"
+                              if r.returncode == 0 and ad_ok else "更新失败: " + ad_msg)); return
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.pop(chat, None) or ""   # 无待输入时为 "", 避免下面 act.startswith(...) 在 None 上崩
     if act == "wloc_location":
@@ -2852,6 +3091,13 @@ def handle_text(chat, text, msg_id=None):
             send(chat, f"坐标无效: {e}\n请重试，格式为 <code>纬度,经度</code>。/cancel 取消。", WLOC_BACK)
             return
         _start_wloc_set(chat, lat, lon); return
+    if act == "adblock_add_source":
+        send_plain(chat, "正在校验并添加 MITM 插件…")
+        def _add_adblock_source(url=text):
+            ok, msg = add_adblock_plugin(url)
+            title, kb = _adblock_sources_page()
+            send(chat, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
+        run_bg(_add_adblock_source); return
     if act == "add_exit":
         # 对齐 5GPN-X: 立刻删含密码消息 + 后台解析写入, 主循环不堵
         link = text
@@ -2997,7 +3243,7 @@ def main():
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
         {"command": "wloc", "description": "iOS WLOC 虚拟定位"},
-        {"command": "adblock", "description": "MITM 声明式去广告"},
+        {"command": "adblock", "description": "普通规则 + MITM 去广告"},
         {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})

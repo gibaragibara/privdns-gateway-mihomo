@@ -82,7 +82,7 @@ sudo ./install.sh
 3. iOS:bot **📱 客户端 → iOS 描述文件**(可填强制直连的 Wi-Fi SSID);**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝均靠服务器 `:81` 探测判定是否启用 DoT(普通宽带 Wi-Fi 探不通则自动直连)。
 4. iOS 网络虚拟定位(可选):主菜单 **📍 iOS 定位**或 `/wloc`。安装 Bot 下发的共享 CA 后，可直接点击服务器预置地点，不必发送 Telegram Location；也支持手工输入经纬度。服务端只对两个 Apple 定位域名启用 WLOC 改写，**无需 Egern/Surge/Loon**。详见 [WLOC 使用说明](docs/WLOC.md)。
-5. MITM 去广告(可选):主菜单 **🛡 MITM 去广告**或 `/adblock`。它复用同一张 CA，只把声明式规则的精确主机送入 sidecar；关闭 WLOC 不会关闭仍被去广告使用的 MITM。详见 [MITM 去广告说明](docs/MITM-ADBLOCK.md)。
+5. 服务端去广告(可选):主菜单 **🛡 去广告**或 `/adblock`。普通 Egern `REJECT` 规则由 mihomo 直接拦截，不需要证书；响应改写复用 WLOC 的共享 CA。关闭 WLOC 不会关闭仍被去广告使用的 MITM。详见 [服务端去广告说明](docs/MITM-ADBLOCK.md)。
 6. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
 7. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
@@ -126,7 +126,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — 新手图文
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
 - [docs/WLOC.md](docs/WLOC.md) — 无 Egern 的服务端 iOS WLOC、共享 CA 与恢复流程
-- [docs/MITM-ADBLOCK.md](docs/MITM-ADBLOCK.md) — 声明式模块移植范围、共享生命周期与限制
+- [docs/MITM-ADBLOCK.md](docs/MITM-ADBLOCK.md) — 普通 REJECT 规则、声明式模块移植范围与共享生命周期
 - [docs/UPSTREAM.md](docs/UPSTREAM.md) — 与上游关系 / 如何吸收新提交
 - [docs/production-notes.md](docs/production-notes.md) — 架构说明
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志

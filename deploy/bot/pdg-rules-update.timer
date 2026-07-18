@@ -1,5 +1,5 @@
 [Unit]
-Description=每日刷新 PrivDNS Gateway 规则库 (geosite + 规则集)
+Description=每日刷新 PrivDNS Gateway 规则库 (geosite + 分流 + 去广告)
 
 [Timer]
 OnCalendar=*-*-* 04:30:00

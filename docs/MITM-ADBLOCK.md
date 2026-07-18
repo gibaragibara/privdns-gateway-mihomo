@@ -1,15 +1,19 @@
-# 服务端 MITM 去广告
+# 服务端去广告
 
-PrivDNS Gateway 可以复用 WLOC 的共享 CA 和本地 mitmproxy sidecar，在不运行 Egern、Loon 或 Surge 的情况下执行一部分声明式去广告规则。
+PrivDNS Gateway 在不运行 Egern、Loon 或 Surge 的情况下提供两层去广告：普通 `REJECT` 域名规则由 mihomo 直接拦截；需要修改响应的声明式规则复用 WLOC 的共享 CA 和本地 mitmproxy sidecar。
 
 ## 使用
 
-1. Telegram Bot 主菜单点 `🛡 MITM 去广告`，也可发送 `/adblock`。
+1. Telegram Bot 主菜单点 `🛡 去广告`，也可发送 `/adblock`。
 2. 如果此前已为 WLOC 安装并完全信任同一张 `mitmproxy` CA，不需要重复安装；否则点 `📜 安装共享 CA`，安装后在 iOS 的证书信任设置中开启完全信任。
 3. 点 `✅ 同步并开启`。Bot 会先下载并编译允许列表中的模块，通过校验后才写入运行配置。
 4. 以后点 `🔄 同步规则` 可原子更新。任一模块下载失败时会保留上一份缓存，不应用残缺规则。
 
-默认来源保存在 `/etc/privdns-gateway/adblock-sources.json`。当前清单来自原 Egern 配置中的 25 个公开 Kelee/Loon 模块；页面显示每次实际编译出的模块、精确主机、规则和未移植脚本数量。
+在 `🧩 MITM 插件管理` 中，删除以单个 Kelee/Loon 插件 URL 为单位；点 `➕ 添加插件 URL` 后发送一个 HTTPS 插件地址即可。添加或删除时，如果去广告已开启，会自动重新编译剩余来源；关闭状态下只保存来源并在下次开启时应用。删除的插件不会在升级时自动恢复。
+
+默认来源保存在 `/etc/privdns-gateway/adblock-sources.json`。普通层包含原 Egern 配置中的 Sukka Reject、Cats-Team AdRules、AWAvenue 三个公开规则源；MITM 层包含 25 个公开 Kelee/Loon 模块。页面分别显示普通 REJECT 与响应改写的实际编译数量。两类来源由 `pdg-rules-update.timer` 每日刷新一次（约 24 小时）；下载失败保留上一版。
+
+普通规则编译为 `/etc/mihomo/rs/__pdg_adblock_reject.yaml`，优先于 MITM 域名规则匹配，不需要安装 CA。第三方源文件和编译结果只保存在服务器，不提交进仓库。
 
 ## 与 WLOC 的关系
 

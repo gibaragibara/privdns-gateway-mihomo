@@ -33,7 +33,7 @@ jobs:
                 -e 's|__CERT_DIR__|/etc/mosdns/certs|g' \
                 -e 's|__SSH_PORT__|22|g' "$1"
           }
-          for t in deploy/singbox/config.json.tmpl; do
+          for t in deploy/mihomo/state.json.tmpl; do
             echo "→ 渲染并校验 $t"
             render "$t" | python3 -m json.tool > /dev/null
             # jq 在 ubuntu-latest 默认就有, 再用它复核一遍
@@ -114,11 +114,11 @@ jobs:
         run: python3 tests/test-maintenance-polish.py
 
   functional:
-    # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。
+    # 真功能测试: 下载钉死 SHA256 的 mihomo / mosdns, 真起一遍, 验证两层核心链路。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: 流量层 (真起 sing-box 验证按 SNI 分到不同出口 + final 兜底)
+      - name: 流量层 (真起 mihomo 验证按域名分到不同出口 + final 兜底)
         run: bash tests/functional-test.sh
       - name: DNS 层 (真起 mosdns 验证 A 劫持 / AAAA·HTTPS 置空 / 国内直连 / 按来源门控)
         run: bash tests/dns-policy-test.sh

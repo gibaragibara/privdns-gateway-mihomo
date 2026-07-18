@@ -17,13 +17,13 @@ gs-loc.apple.com / gs-loc-cn.apple.com
   → Apple
 ```
 
-WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若 MITM 去广告同时开启，sidecar 也会接收其独立精确主机集；关闭 WLOC 后 Apple 定位域名立即恢复直连，但 sidecar 会继续服务去广告。
+WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若去广告同时开启，sidecar 也会接收其独立精确主机集；关闭 WLOC 后 Apple 定位域名立即恢复直连，但 sidecar 会继续服务去广告。
 
 ## 首次使用
 
 1. Telegram Bot 主菜单点 `📍 iOS 定位`，也可发送 `/wloc`；这个入口始终可重新打开。
 2. 点 `📜 安装共享 CA`，保存并安装 Bot 发来的 `PrivDNS-WLOC-CA.mobileconfig`。
-3. 在 iOS 打开 `设置 → 通用 → 关于本机 → 证书信任设置`，对 `mitmproxy` 开启完全信任。WLOC 与 MITM 去广告复用这张证书，已安装并信任时无需重复安装。
+3. 在 iOS 打开 `设置 → 通用 → 关于本机 → 证书信任设置`，对 `mitmproxy` 开启完全信任。WLOC 与去广告的响应改写复用这张证书，已安装并信任时无需重复安装。
 4. 回到 Bot，直接点服务器预置地点。按钮只提交预置 ID，不要求发送 Telegram Location。
 5. 没有合适预置时可点 `✍️ 输入经纬度`，发送 WGS84 `纬度,经度`。
 6. 首次完全信任 CA 并设置目标后重启 iPhone，让 `locationd` 重新建立 TLS 会话并重新获取 WLOC 数据。
@@ -70,7 +70,7 @@ WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若 MITM 
 
 1. 清空 WLOC DNS 域名集并重启 mosdns，清除服务端缓存。
 2. 从 mihomo 删除两个 Apple 域名规则。
-3. 如果 MITM 去广告也已关闭，才删除本地 HTTP sidecar 出口并停止 `pdg-wloc.service`；否则共享服务保持运行。
+3. 如果去广告也已关闭，才删除本地 HTTP sidecar 出口并停止 `pdg-wloc.service`；否则共享服务保持运行。
 
 共享 CA 描述文件会留在 iPhone，方便下次使用，也供去广告复用。长期不使用任何 MITM 功能时可在 iOS 的 VPN 与设备管理中删除该描述文件。
 

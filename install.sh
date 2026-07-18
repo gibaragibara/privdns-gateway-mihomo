@@ -288,6 +288,10 @@ install -d -o pdg-wloc -g pdg-wloc -m700 /var/lib/pdg-wloc/mitmproxy
 install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/firewall/journald-50-pdg.conf /etc/systemd/system/journald.conf.d/50-pdg.conf
 
+python3 /opt/pdg-bot/sync_adblock.py \
+  --sources /etc/privdns-gateway/adblock-sources.json \
+  --merge-defaults "$REPO_DIR"/deploy/mitm/adblock-sources.json --merge-only
+
 # A preserved enabled state needs its compiled cache before Bot renders the
 # matching mosdns/mihomo exact-host routes.
 if jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
@@ -368,7 +372,8 @@ for _ in $(seq 1 30); do
 done
 [[ -s /var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer ]] || die "共享 MITM 未能生成 CA"
 if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
-  || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
+  || { jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1 \
+       && jq -e '.stats.host_count > 0' /var/lib/pdg-wloc/adblock-rules.json >/dev/null 2>&1; }; then
   systemctl enable pdg-wloc >/dev/null 2>&1 || true
 else
   systemctl disable --now pdg-wloc >/dev/null 2>&1 || true

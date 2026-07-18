@@ -25,5 +25,10 @@
     {"name": "YouTube 去广告", "url": "https://kelee.one/Tool/Loon/Lpx/YouTube_remove_ads.lpx", "enabled": true},
     {"name": "QQ 音乐去广告", "url": "https://kelee.one/Tool/Loon/Lpx/QQMusic_remove_ads.lpx", "enabled": true},
     {"name": "12306 去广告", "url": "https://kelee.one/Tool/Loon/Lpx/12306_remove_ads.lpx", "enabled": true}
+  ],
+  "domain_sources": [
+    {"name": "Sukka Reject", "url": "https://ruleset.skk.moe/List/domainset/reject.conf", "format": "domain-set", "enabled": true},
+    {"name": "Cats-Team AdRules", "url": "https://raw.githubusercontent.com/Cats-Team/AdRules/main/adrules.list", "format": "classical", "enabled": true},
+    {"name": "AWAvenue Ads Rule", "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/refs/heads/main/Filters/AWAvenue-Ads-Rule-Surge-RULE-SET.list", "format": "classical", "enabled": true}
   ]
 }

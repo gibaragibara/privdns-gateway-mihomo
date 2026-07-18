@@ -393,7 +393,8 @@ cmd_rollback(){
   nft -f /etc/nftables.conf 2>/dev/null || true
   systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
   if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
-    || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
+    || { jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1 \
+         && jq -e '.stats.host_count > 0' /var/lib/pdg-wloc/adblock-rules.json >/dev/null 2>&1; }; then
     systemctl enable --now pdg-wloc 2>/dev/null || true
   else
     systemctl disable --now pdg-wloc 2>/dev/null || true
@@ -460,12 +461,19 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/wloc/migrate_wloc.py     /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/mitm/adblock_mitm.py     /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/mitm/sync_adblock.py     /opt/pdg-bot/
+  if ! python3 /opt/pdg-bot/sync_adblock.py \
+      --sources /etc/privdns-gateway/adblock-sources.json \
+      --merge-defaults "$REPO_DIR"/deploy/mitm/adblock-sources.json --merge-only; then
+    c_y "去广告规则源迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
   install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service    /etc/systemd/system/
   if ! python3 /opt/pdg-bot/migrate_wloc.py /etc/mosdns/config.yaml; then
     c_y "mosdns 共享 MITM 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
+  install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/system/ 2>/dev/null || true
+  install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
   install -m644 "$REPO_DIR"/deploy/mosdns/rules/whatsapp.txt /etc/mosdns/rules/whatsapp.txt 2>/dev/null || true
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
@@ -482,7 +490,7 @@ cmd_update(){
 
   if jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
     if ! python3 /opt/pdg-bot/sync_adblock.py; then
-      c_y "MITM 去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+      c_y "去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
     fi
   fi
   if ! python3 - <<'PY'
@@ -512,7 +520,8 @@ PY
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
   if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
-    || jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
+    || { jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1 \
+         && jq -e '.stats.host_count > 0' /var/lib/pdg-wloc/adblock-rules.json >/dev/null 2>&1; }; then
     systemctl enable pdg-wloc >/dev/null 2>&1 || true
     if ! systemctl restart pdg-wloc \
       || [[ "$(systemctl is-active pdg-wloc 2>/dev/null)" != "active" ]]; then

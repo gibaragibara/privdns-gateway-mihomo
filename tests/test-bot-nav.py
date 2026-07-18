@@ -14,7 +14,7 @@ assert 'edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK)' in bot and "se
 assert 'edit(chat, mid, "✅ 已重启 mihomo + mosdns" if ok else msg, OPS_BACK)' in bot, (
     "restart result must stay in ops navigation"
 )
-assert 'geosite 已更新; 规则集刷新' in bot and "OPS_BACK" in bot, (
+assert 'geosite 已更新; 分流规则集刷新' in bot and "OPS_BACK" in bot, (
     "rule-update result path should stay covered with OPS_BACK"
 )
 # 5GPN-X style async helpers must exist

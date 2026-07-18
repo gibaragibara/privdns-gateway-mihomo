@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Regression tests for the declarative Loon/Egern adblock compiler."""
 import importlib.util
+import json
+import os
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +64,65 @@ partial = sync.compile_sources({"sources": [
    if url.endswith("broken") else MODULE)
 assert partial["stats"]["failed_sources"] == 1
 assert partial["failures"][0]["name"] == "broken"
+
+domain_set = """
+# comment
+.ads.example.com
+exact.example.net
+*.unsupported.example.org
+"""
+parsed_domains = sync.parse_domain_source(
+    domain_set, "domain-set", "https://example.com/domains", "domain-set")
+assert parsed_domains["rules"] == [
+    "DOMAIN-SUFFIX,ads.example.com", "DOMAIN,exact.example.net",
+]
+assert parsed_domains["stats"]["unsupported_lines"] == 1
+
+classical = """
+DOMAIN,api.ads.example.com
+DOMAIN-SUFFIX,ads.example.com
+DOMAIN-KEYWORD,-ad.example
+IP-CIDR,192.0.2.9/24,no-resolve
+PROCESS-NAME,bad
+"""
+parsed_classical = sync.parse_domain_source(
+    classical, "classical", "https://example.com/rules", "classical")
+assert parsed_classical["rules"] == [
+    "DOMAIN,api.ads.example.com", "DOMAIN-SUFFIX,ads.example.com",
+    "DOMAIN-KEYWORD,-ad.example", "IP-CIDR,192.0.2.0/24,no-resolve",
+]
+assert parsed_classical["stats"]["unsupported_lines"] == 1
+
+domain_config = {"domain_sources": [
+    {"name": "one", "url": "https://example.com/one", "format": "domain-set"},
+    {"name": "two", "url": "https://example.com/two", "format": "classical"},
+]}
+compiled_domains = sync.compile_domain_sources(
+    domain_config, fetcher=lambda url: domain_set if url.endswith("one") else classical)
+assert compiled_domains["stats"] == {
+    "domain_source_count": 2,
+    "domain_failed_sources": 0,
+    "domain_rule_count": 5,
+    "domain_unsupported_lines": 2,
+}
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    provider = root / "provider.yaml"
+    sync.atomic_write_provider(str(provider), compiled_domains["rules"])
+    assert provider.read_text(encoding="utf-8").startswith(
+        'payload:\n  - "DOMAIN-SUFFIX,ads.example.com"\n')
+    assert os.stat(provider).st_mode & 0o777 == 0o600
+
+    current = root / "sources.json"
+    defaults = root / "defaults.json"
+    current.write_text(json.dumps({"sources": []}), encoding="utf-8")
+    defaults.write_text(json.dumps({"sources": [1], "domain_sources": [2]}), encoding="utf-8")
+    assert sync.merge_source_defaults(str(current), str(defaults))
+    assert json.loads(current.read_text(encoding="utf-8")) == {
+        "sources": [], "domain_sources": [2],
+    }
+    assert not sync.merge_source_defaults(str(current), str(defaults))
 
 try:
     sync.parse_action("response-body-json-jq", "'env'")
