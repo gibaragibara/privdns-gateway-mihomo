@@ -289,8 +289,8 @@ PY
 }
 
 migrate_mosdns_whatsapp(){
-  local conf="${1:-/etc/mosdns/config.yaml}"
-  local rules="${2:-/etc/mosdns/rules}"
+  local conf="/etc/mosdns/config.yaml"
+  local rules="/etc/mosdns/rules"
   local repo="${REPO_DIR:-/opt/privdns-gateway}"
   [[ -f "$conf" ]] || return 0
   mkdir -p "$rules"

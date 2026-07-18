@@ -7,7 +7,15 @@ ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=lib/versions.sh
 source "$ROOT/lib/versions.sh"
 WORK="$(mktemp -d)"; PIDS=()
-trap 'for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done; rm -rf "$WORK"' EXIT
+cleanup(){
+  local pid
+  for pid in "${PIDS[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 fail(){ echo "[FAIL] $*" >&2; exit 1; }
 note(){ echo "[*] $*"; }
 
