@@ -297,6 +297,20 @@ class WlocAddon:
     def __init__(self, config_path=CONFIG_PATH):
         self.config_path = config_path
 
+    def responseheaders(self, flow):
+        host = str(getattr(flow.request, "pretty_host", "")).lower()
+        path = str(getattr(flow.request, "path", "")).split("?", 1)[0]
+        if host not in TARGET_HOSTS or path != TARGET_PATH or flow.response is None:
+            return
+        headers = flow.response.headers
+        _log("info", "WLOC response headers host=%s client_http=%s server_http=%s "
+             "length=%s encoding=%s transfer=%s",
+             host, getattr(flow.request, "http_version", "?"),
+             getattr(flow.response, "http_version", "?"),
+             headers.get("content-length", "-"),
+             headers.get("content-encoding", "-"),
+             headers.get("transfer-encoding", "-"))
+
     def response(self, flow):
         host = str(getattr(flow.request, "pretty_host", "")).lower()
         path = str(getattr(flow.request, "path", "")).split("?", 1)[0]
