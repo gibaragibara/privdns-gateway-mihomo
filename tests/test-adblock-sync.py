@@ -46,7 +46,21 @@ assert parsed["stats"] == {
     "unsupported_actions": {"response-body-json-jq": 1},
     "unported_scripts": 1,
     "skipped_hosts": 1,
+    "unused_hosts": 0,
 }
+
+GROUPED_MODULE = r'''
+[Rewrite]
+^https:\/\/(?:api|app)\.example\.com\/ad reject-dict
+[Script]
+http-response ^https:\/\/script-only\.example\.com script-path=https://example.com/a.js
+[MitM]
+hostname=api.example.com, app.example.com, script-only.example.com
+'''
+grouped = sync.parse_module(GROUPED_MODULE, "grouped")
+assert grouped["hosts"] == ["api.example.com", "app.example.com"]
+assert grouped["stats"]["unused_hosts"] == 1
+assert grouped["stats"]["unported_scripts"] == 1
 
 config = {"sources": [
     {"name": "one", "url": "https://example.com/one", "enabled": True},
@@ -55,9 +69,29 @@ config = {"sources": [
 compiled = sync.compile_sources(config, fetcher=lambda _url: MODULE)
 assert compiled["stats"]["source_count"] == 1
 assert compiled["stats"]["host_count"] == 1
+assert compiled["stats"]["declared_host_count"] == 1
+assert compiled["stats"]["excluded_host_count"] == 0
 assert compiled["stats"]["rule_count"] == 4
 assert compiled["stats"]["unported_scripts"] == 1
 assert compiled["failures"] == []
+
+excluded = sync.compile_sources({
+    "sources": [{"name": "one", "url": "https://example.com/one"}],
+    "mitm_exclude_hosts": ["API.EXAMPLE.COM."],
+}, fetcher=lambda _url: MODULE)
+assert excluded["hosts"] == []
+assert excluded["excluded_hosts"] == ["api.example.com"]
+assert excluded["stats"]["declared_host_count"] == 1
+assert excluded["stats"]["excluded_host_count"] == 1
+assert excluded["stats"]["rule_count"] == 4
+
+for invalid_exclusions in ("api.example.com", ["*.example.com"], [123]):
+    try:
+        sync.compile_sources({"sources": [], "mitm_exclude_hosts": invalid_exclusions})
+    except sync.CompileError:
+        pass
+    else:
+        raise AssertionError(f"invalid MITM exclusions accepted: {invalid_exclusions!r}")
 
 barrier = threading.Barrier(sync.SOURCE_FETCH_WORKERS)
 worker_ids = set()
@@ -291,11 +325,21 @@ with tempfile.TemporaryDirectory() as td:
 
     current = root / "sources.json"
     defaults = root / "defaults.json"
-    current.write_text(json.dumps({"sources": []}), encoding="utf-8")
+    current.write_text(json.dumps({
+        "sources": [],
+        "mitm_exclude_hosts": ["private.example.com"],
+        "compatibility_routes": [
+            {"type": "domain", "value": "private.example.com", "outbound": "private"},
+        ],
+    }), encoding="utf-8")
     defaults.write_text(json.dumps({"sources": [1], "domain_sources": [2]}), encoding="utf-8")
     assert sync.merge_source_defaults(str(current), str(defaults))
     assert json.loads(current.read_text(encoding="utf-8")) == {
         "sources": [], "domain_sources": [2],
+        "mitm_exclude_hosts": ["private.example.com"],
+        "compatibility_routes": [
+            {"type": "domain", "value": "private.example.com", "outbound": "private"},
+        ],
     }
     assert not sync.merge_source_defaults(str(current), str(defaults))
 

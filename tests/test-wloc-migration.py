@@ -18,8 +18,10 @@ assert not changed and ready == current
 
 legacy = current.replace(migration.DOMAIN_PLUGIN, "", 1)
 legacy = legacy.replace(migration.ADBLOCK_DOMAIN_PLUGIN, "", 1)
+legacy = legacy.replace(migration.FORCE_PROXY_DOMAIN_PLUGIN, "", 1)
 legacy = legacy.replace(migration.SEQUENCE_PLUGIN, "", 1)
 legacy = legacy.replace(migration.ADBLOCK_DISPATCH, "", 1)
+legacy = legacy.replace(migration.FORCE_PROXY_DISPATCH, "", 1)
 legacy = legacy.replace(migration.DISPATCH, "", 1)
 assert "geosite_wloc" not in legacy and "wloc_sequence" not in legacy
 
@@ -53,5 +55,13 @@ except ValueError as exc:
     assert "adblock" in str(exc)
 else:
     raise AssertionError("partial adblock migration must be rejected")
+
+try:
+    migration.migrate_text(legacy.replace(
+        "  - tag: geosite_cn\n", migration.FORCE_PROXY_DOMAIN_PLUGIN + "  - tag: geosite_cn\n", 1))
+except ValueError as exc:
+    assert "force-proxy" in str(exc)
+else:
+    raise AssertionError("partial force-proxy migration must be rejected")
 
 print("wloc-migration regression OK")

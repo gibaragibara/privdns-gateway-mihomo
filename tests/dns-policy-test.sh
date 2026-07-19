@@ -70,6 +70,7 @@ echo "qq.com" > "$WORK/rules/geosite_cn.txt"
 : > "$WORK/rules/adblock.txt"
 : > "$WORK/rules/whatsapp.txt"
 echo "domain:unlktest.example" > "$WORK/rules/unlock.txt"
+echo "domain:forced.qq.com" > "$WORK/rules/force_proxy.txt"
 
 # ── 渲染真实 config.yaml → 测试版(上游指 mock, 端口换高位, 去掉 DoT server 省证书)──
 MOCK_UP="{addr: \"udp://127.0.0.1:$MOCKP\"}"
@@ -116,6 +117,7 @@ expect_eq      "代理域名 A → 劫持到网关IP"            "$(q example.co
 expect_empty   "代理域名 AAAA → mosdns 置空(mock 本会回 AAAA)"   "$(q example.com AAAA)"
 expect_empty   "代理域名 HTTPS(65) → mosdns 置空"     "$(q example.com TYPE65)"
 expect_eq      "国内域名 A → 直连走上游"              "$(q www.qq.com A)"      "$UPSTREAM_IP"
+expect_eq      "强制网关域名优先于国内直连"            "$(q forced.qq.com A)"   "$SERVER_IP"
 expect_nonempty "国内域名 AAAA → 不被置空(走上游)"    "$(q www.qq.com AAAA)"
 
 # ── 4b. 非内网来源(内网段不含 127, 故本机 dig 视为"外部")──

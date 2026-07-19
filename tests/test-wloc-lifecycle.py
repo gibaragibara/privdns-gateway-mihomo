@@ -16,7 +16,7 @@ for marker in ("mitmproxy", "wloc_mitm.py", "migrate_wloc.py", "pdg-wloc.service
                "/var/lib/pdg-wloc/wloc.json", "/etc/mosdns/rules/wloc.txt",
                "wloc-presets.json", "adblock_mitm.py", "sync_adblock.py",
                "/var/lib/pdg-wloc/adblock.json", "/etc/mosdns/rules/adblock.txt",
-               "adblock-sources.json"):
+               "/etc/mosdns/rules/force_proxy.txt", "adblock-sources.json"):
     assert marker in install, f"fresh install is missing {marker}"
     assert marker in pdg, f"update path is missing {marker}"
 
@@ -31,6 +31,7 @@ assert "[[ -f /etc/mosdns/rules/wloc.txt ]]" in install, (
 )
 assert "[[ -f /var/lib/pdg-wloc/adblock.json ]]" in pdg
 assert "[[ -f /etc/mosdns/rules/adblock.txt ]]" in pdg
+assert "[[ -f /etc/mosdns/rules/force_proxy.txt ]]" in pdg
 assert "bot._wloc_write_domains(bot._wloc_active())" in install, (
     "install must synchronize the WLOC DNS domain set with the preserved state"
 )

@@ -19,7 +19,10 @@ assert spec.loader is not None
 spec.loader.exec_module(bot)
 
 BASE = {
-    "outbounds": [{"type": "direct", "tag": "jp"}],
+    "outbounds": [
+        {"type": "direct", "tag": "jp"},
+        {"type": "direct", "tag": "residential"},
+    ],
     "route": {
         "rules": [{"ip_cidr": ["203.0.113.10/32", "127.0.0.0/8"], "action": "reject"}],
         "final": "jp",
@@ -40,6 +43,7 @@ with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     bot.WLOC_STATE = str(root / "wloc.json")
     bot.WLOC_DOMAINS = str(root / "wloc.txt")
+    bot.MOSDNS_FORCE_PROXY = str(root / "force_proxy.txt")
     bot.MOSDNS_CONF = str(root / "mosdns.yaml")
     bot.WLOC_CA = str(root / "mitmproxy-ca-cert.cer")
     bot.WLOC_PRESETS = str(root / "wloc-presets.json")
@@ -50,9 +54,15 @@ with tempfile.TemporaryDirectory() as td:
     bot.ADBLOCK_DOMAIN_PROVIDER_FILE = str(root / "adblock-provider.mrs")
     bot.ADBLOCK_CLASSICAL_PROVIDER_FILE = str(root / "adblock-classical.yaml")
     bot.MITM_LOCK_FILE = str(root / "pdg-mitm.lock")
+    bot.STATE = str(root / "state.json")
+    bot.RS_DIR = str(root / "rs")
+    bot.RS_META = str(root / "rulesets.json")
+    Path(bot.RS_DIR).mkdir()
+    Path(bot.STATE).write_text(json.dumps(BASE), encoding="utf-8")
     Path(bot.MOSDNS_CONF).write_text(
-        "tag: geosite_wloc\ntag: geosite_adblock\ntag: wloc_sequence\n"
-        "qname $geosite_wloc\nqname $geosite_adblock\n", encoding="utf-8")
+        "tag: geosite_wloc\ntag: geosite_force_proxy\ntag: geosite_adblock\n"
+        "tag: wloc_sequence\nqname $geosite_wloc\nqname $geosite_force_proxy\n"
+        "qname $geosite_adblock\n", encoding="utf-8")
     bot._adblock_write_state(bot._adblock_default())
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({"hosts": [], "rules": []}),
                                          encoding="utf-8")
@@ -62,9 +72,59 @@ with tempfile.TemporaryDirectory() as td:
             {"name": "插件二", "url": "https://example.com/two.lpx", "enabled": True},
         ],
         "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
+        "mitm_exclude_hosts": ["api.example.com"],
+        "compatibility_routes": [
+            {"type": "domain", "value": "api.example.com", "outbound": "residential"},
+            {"type": "domain-suffix", "value": "cdn.example.com",
+             "outbound": "residential"},
+        ],
     }), encoding="utf-8")
     assert len(bot._adblock_module_sources()) == 2
     assert len(bot._adblock_domain_sources()) == 1
+    assert bot._adblock_excluded_hosts(strict=True) == ["api.example.com"]
+    assert bot._adblock_compatibility_routes(
+        bot._adblock_source_config(), BASE, strict=True) == [
+            {"type": "domain", "value": "api.example.com", "outbound": "residential"},
+            {"type": "domain-suffix", "value": "cdn.example.com",
+             "outbound": "residential"},
+        ]
+    try:
+        bot._adblock_compatibility_routes({
+            "compatibility_routes": [
+                {"type": "domain", "value": "api.example.com", "outbound": "missing"},
+            ],
+        }, BASE, strict=True)
+    except ValueError as exc:
+        assert "出口不存在" in str(exc)
+    else:
+        raise AssertionError("compatibility route accepted an unknown outbound")
+
+    compact_surge = ("# comment DOMAIN-SUFFIX,push.example # next "
+                     "IP-CIDR,17.1.0.0/16,no-resolve "
+                     "IP-CIDR6,2001:db8::/32,no-resolve")
+    assert bot._parse_surge_rules(compact_surge) == (
+        [], ["push.example"], [], ["17.1.0.0/16", "2001:db8::/32"])
+
+    force_provider = Path(bot.RS_DIR) / "rs_apns.yaml"
+    force_provider.write_text(
+        "payload:\n  - DOMAIN-SUFFIX,push.example\n"
+        "  - IP-CIDR6,2001:db8::/32\n", encoding="utf-8")
+    force_state = json.loads(json.dumps(BASE))
+    force_state["route"]["rule_set"] = [{
+        "tag": "rs_apns", "type": "local", "format": "classical",
+        "path": str(force_provider),
+    }]
+    force_state["route"]["rules"] = [{
+        "rule_set": "rs_apns", "outbound": "jp", "force_gateway": True,
+    }, *force_state["route"]["rules"]]
+    assert bot._force_gateway_domain_lines(force_state) == ["domain:push.example"]
+    bot._adblock_write_state(bot._adblock_default())
+    forced_config = bot._mihomo_config(force_state)
+    assert forced_config["rules"][0] == "RULE-SET,rs_apns,jp"
+    assert not any(bot.WLOC_OUTBOUND in rule for rule in forced_config["rules"])
+    ok, detail = bot._write_force_gateway_domains(force_state, restart=False)
+    assert ok and detail == ""
+    assert Path(bot.MOSDNS_FORCE_PROXY).read_text() == "domain:push.example\n"
     bot._adblock_check_plugin = lambda _url: (True, {
         "supported_rewrites": 2, "unported_scripts": 1,
     })
@@ -85,6 +145,9 @@ with tempfile.TemporaryDirectory() as td:
     assert not ok
     ok, _ = bot.delete_adblock_domain_source(bot._adblock_source_id(domain_url))
     assert ok and len(bot._adblock_domain_sources()) == 1
+    preserved_config = bot._adblock_source_config()
+    assert preserved_config["mitm_exclude_hosts"] == ["api.example.com"]
+    assert len(preserved_config["compatibility_routes"]) == 2
 
     valid_sources = Path(bot.ADBLOCK_SOURCES).read_bytes()
     Path(bot.ADBLOCK_SOURCES).write_text("{broken json", encoding="utf-8")
@@ -150,7 +213,11 @@ with tempfile.TemporaryDirectory() as td:
         "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
     }), encoding="utf-8")
     adblock_only = bot._mihomo_config(BASE)
-    assert adblock_only["rules"][0] == f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}"
+    assert adblock_only["rules"][:3] == [
+        "DOMAIN,api.example.com,residential",
+        "DOMAIN-SUFFIX,cdn.example.com,residential",
+        f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
+    ]
     assert not any("gs-loc" in rule for rule in adblock_only["rules"])
 
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({
@@ -171,7 +238,9 @@ with tempfile.TemporaryDirectory() as td:
         "type": "file", "behavior": "classical",
         "path": bot.ADBLOCK_CLASSICAL_PROVIDER_FILE,
     }
-    assert combined["rules"][:3] == [
+    assert combined["rules"][:5] == [
+        "DOMAIN,api.example.com,residential",
+        "DOMAIN-SUFFIX,cdn.example.com,residential",
         f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
         f"RULE-SET,{bot.ADBLOCK_CLASSICAL_PROVIDER},REJECT",
         f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
@@ -184,7 +253,9 @@ with tempfile.TemporaryDirectory() as td:
     }), encoding="utf-8")
     normal_only = bot._mihomo_config(BASE)
     assert bot.WLOC_OUTBOUND not in [proxy["name"] for proxy in normal_only["proxies"]]
-    assert normal_only["rules"][:2] == [
+    assert normal_only["rules"][:4] == [
+        "DOMAIN,api.example.com,residential",
+        "DOMAIN-SUFFIX,cdn.example.com,residential",
         f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
         f"RULE-SET,{bot.ADBLOCK_CLASSICAL_PROVIDER},REJECT",
     ]

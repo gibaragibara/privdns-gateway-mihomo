@@ -238,6 +238,8 @@ fi
   || : > /etc/mosdns/rules/wloc.txt       # WLOC 两域名(空=Apple 定位不进共享 MITM)
 [[ -f /etc/mosdns/rules/adblock.txt ]] \
   || : > /etc/mosdns/rules/adblock.txt    # 声明式去广告精确主机(空=关闭)
+[[ -f /etc/mosdns/rules/force_proxy.txt ]] \
+  || : > /etc/mosdns/rules/force_proxy.txt # 强制网关透明转发域名(空=关闭)
 # WhatsApp 无 SNI: 返回真实 A(不劫持); 模板随仓库, 缺则建默认
 if [[ -f "$REPO_DIR/deploy/mosdns/rules/whatsapp.txt" ]]; then
   install -m644 "$REPO_DIR/deploy/mosdns/rules/whatsapp.txt" /etc/mosdns/rules/whatsapp.txt

@@ -27,6 +27,7 @@ MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_DOMAIN_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_DOMAIN_JSON_CHARS = 8 * 1024 * 1024
 MAX_ADBLOCK_SOURCES = 64
+MAX_MITM_EXCLUDED_HOSTS = 256
 MAX_DOMAIN_SOURCE_LINES = 500_000
 MAX_DOMAIN_RULES_PER_SOURCE = 400_000
 MAX_DOMAIN_RULES_TOTAL = 600_000
@@ -186,6 +187,35 @@ def _module_hosts(lines):
     return hosts, skipped
 
 
+def _pattern_target_hosts(pattern, hosts):
+    value = str(pattern).replace(r"\/", "/")
+    marker = value.find("://")
+    if marker < 0:
+        return set(hosts)  # A path-only expression may apply to every declared host.
+    start = marker + 3
+    bracket = False
+    escaped = False
+    end = len(value)
+    for index in range(start, len(value)):
+        char = value[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "[":
+            bracket = True
+        elif char == "]":
+            bracket = False
+        elif char == "/" and not bracket:
+            end = index
+            break
+    try:
+        host_pattern = re.compile(r"^(?:" + value[start:end] + r")$", re.IGNORECASE)
+    except re.error:
+        return set(hosts)  # Keep the declared scope when a hostname cannot be isolated safely.
+    return {host for host in hosts if host_pattern.fullmatch(host)}
+
+
 def parse_module(text, name, source_url=""):
     sections = {}
     section = None
@@ -230,10 +260,14 @@ def parse_module(text, name, source_url=""):
             "source": str(name)[:80],
         })
 
+    active_hosts = set()
+    for rule in rules:
+        active_hosts.update(_pattern_target_hosts(rule["pattern"], hosts))
+
     return {
         "name": str(name)[:80],
         "url": str(source_url),
-        "hosts": sorted(hosts),
+        "hosts": sorted(active_hosts),
         "rules": rules,
         "stats": {
             "supported_rewrites": len(rules),
@@ -241,6 +275,7 @@ def parse_module(text, name, source_url=""):
             "unsupported_actions": dict(sorted(unsupported.items())),
             "unported_scripts": scripts,
             "skipped_hosts": skipped_hosts,
+            "unused_hosts": len(hosts - active_hosts),
         },
     }
 
@@ -265,11 +300,34 @@ def _fetched_source_batches(items, fetcher):
             yield pending
 
 
+def mitm_excluded_hosts(config):
+    items = config.get("mitm_exclude_hosts", []) if isinstance(config, dict) else []
+    if not isinstance(items, list):
+        raise CompileError("mitm_exclude_hosts must be a list")
+    if len(items) > MAX_MITM_EXCLUDED_HOSTS:
+        raise CompileError(
+            f"mitm_exclude_hosts exceeds the {MAX_MITM_EXCLUDED_HOSTS}-host limit")
+    hosts = set()
+    for value in items:
+        if not isinstance(value, str):
+            raise CompileError("mitm_exclude_hosts entries must be strings")
+        host = value.strip().lower().rstrip(".")
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise CompileError("invalid excluded MITM hostname") from exc
+        if not HOST_RE.fullmatch(host):
+            raise CompileError("invalid excluded MITM hostname")
+        hosts.add(host)
+    return sorted(hosts)
+
+
 def compile_sources(config, fetcher=fetch_text):
     items = _enabled_source_items(config, "sources")
+    configured_exclusions = set(mitm_excluded_hosts(config))
     compiled_sources = []
     rules = []
-    hosts = set()
+    declared_hosts = set()
     seen_rules = set()
     failures = []
     for batch in _fetched_source_batches(items, fetcher):
@@ -284,24 +342,30 @@ def compile_sources(config, fetcher=fetch_text):
             compiled_sources.append({key: module[key] for key in ("name", "url", "stats")})
             if not module["rules"]:
                 continue
-            hosts.update(module["hosts"])
+            declared_hosts.update(module["hosts"])
             for rule in module["rules"]:
                 key = json.dumps(rule, ensure_ascii=False, sort_keys=True)
                 if key not in seen_rules:
                     seen_rules.add(key)
                     rules.append(rule)
+    excluded_hosts = declared_hosts & configured_exclusions
+    hosts = declared_hosts - configured_exclusions
     stats = {
         "source_count": len(compiled_sources),
         "failed_sources": len(failures),
         "host_count": len(hosts),
+        "declared_host_count": len(declared_hosts),
+        "excluded_host_count": len(excluded_hosts),
         "rule_count": len(rules),
         "unported_scripts": sum(s["stats"]["unported_scripts"] for s in compiled_sources),
         "unsupported_rewrites": sum(s["stats"]["unsupported_rewrites"] for s in compiled_sources),
+        "unused_hosts": sum(s["stats"].get("unused_hosts", 0) for s in compiled_sources),
     }
     return {
         "version": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "hosts": sorted(hosts),
+        "excluded_hosts": sorted(excluded_hosts),
         "rules": rules,
         "sources": compiled_sources,
         "failures": failures,
@@ -717,7 +781,8 @@ def main():
         count = len(failures)
         names = ", ".join(item["name"] for item in failures[:5])
         raise SystemExit(f"{count} adblock source(s) failed ({names}); previous cache kept")
-    if compiled["rules"] and not compiled["hosts"]:
+    if compiled["rules"] and not compiled["hosts"] \
+            and not compiled["stats"].get("declared_host_count"):
         raise SystemExit("MITM rewrites were compiled without any exact hosts")
     if config.get("domain_sources") and not domain["rules"]:
         raise SystemExit("no usable domain adblock rules were compiled")

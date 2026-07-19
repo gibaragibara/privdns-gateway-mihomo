@@ -23,6 +23,7 @@ MIHOMO_CFG = "/etc/mihomo/config.yaml" # 实际给 mihomo 读取的原生 YAML
 RS_DIR = "/etc/mihomo/rs"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 MOSDNS_DIRECT = "/etc/mosdns/rules/custom_direct.txt"
+MOSDNS_FORCE_PROXY = "/etc/mosdns/rules/force_proxy.txt"
 RS_META = "/opt/pdg-bot/rulesets.json"
 UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
@@ -50,6 +51,7 @@ ADBLOCK_CLASSICAL_PROVIDER = "__pdg_adblock_reject_classical"
 ADBLOCK_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 ADBLOCK_SOURCE_LIMIT = 64
 ADBLOCK_FETCH_WORKERS = 4
+ADBLOCK_COMPATIBILITY_LIMIT = 256
 MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
@@ -281,7 +283,8 @@ def _adblock_hosts():
                                    str(host).strip().lower())})
 
 def _adblock_source_config(strict=False):
-    empty = {"sources": [], "domain_sources": []}
+    empty = {"sources": [], "domain_sources": [],
+             "mitm_exclude_hosts": [], "compatibility_routes": []}
     try:
         with open(ADBLOCK_SOURCES, encoding="utf-8") as file:
             config = json.load(file)
@@ -295,7 +298,7 @@ def _adblock_source_config(strict=False):
         if strict:
             raise ValueError("去广告来源配置不是 JSON 对象，已拒绝覆盖；请先恢复配置")
         return empty
-    for key in ("sources", "domain_sources"):
+    for key in ("sources", "domain_sources", "mitm_exclude_hosts", "compatibility_routes"):
         if key not in config:
             config[key] = []
         elif not isinstance(config[key], list):
@@ -303,6 +306,80 @@ def _adblock_source_config(strict=False):
                 raise ValueError(f"去广告来源配置中的 {key} 不是列表，已拒绝覆盖")
             config[key] = []
     return config
+
+
+def _adblock_hostname(value):
+    if not isinstance(value, str):
+        raise ValueError("兼容模式域名必须是字符串")
+    host = value.strip().lower().rstrip(".")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("兼容模式域名无效") from exc
+    if not re.fullmatch(
+            r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", host):
+        raise ValueError("兼容模式域名无效")
+    return host
+
+
+def _adblock_excluded_hosts(config=None, strict=False):
+    if config is None:
+        config = _adblock_source_config(strict=strict)
+    items = config.get("mitm_exclude_hosts", [])
+    if not isinstance(items, list) or len(items) > ADBLOCK_COMPATIBILITY_LIMIT:
+        if strict:
+            raise ValueError(f"MITM 排除域名必须是列表且最多 {ADBLOCK_COMPATIBILITY_LIMIT} 个")
+        return []
+    result = []
+    for value in items:
+        try:
+            host = _adblock_hostname(value)
+        except ValueError:
+            if strict:
+                raise
+            continue
+        if host not in result:
+            result.append(host)
+    return result
+
+
+def _adblock_compatibility_routes(config=None, mihomo_state=None, strict=False):
+    if config is None:
+        config = _adblock_source_config(strict=strict)
+    items = config.get("compatibility_routes", [])
+    if not isinstance(items, list) or len(items) > ADBLOCK_COMPATIBILITY_LIMIT:
+        if strict:
+            raise ValueError(f"兼容路由必须是列表且最多 {ADBLOCK_COMPATIBILITY_LIMIT} 条")
+        return []
+    available = ({str(item.get("tag")) for item in mihomo_state.get("outbounds", [])
+                  if isinstance(item, dict) and item.get("tag")}
+                 if isinstance(mihomo_state, dict) else None)
+    routes = []
+    seen = set()
+    for item in items:
+        try:
+            if not isinstance(item, dict):
+                raise ValueError("兼容路由条目必须是 JSON 对象")
+            kind = str(item.get("type") or "").strip().lower()
+            if kind not in ("domain", "domain-suffix"):
+                raise ValueError("兼容路由 type 只支持 domain 或 domain-suffix")
+            value = _adblock_hostname(item.get("value"))
+            outbound = item.get("outbound")
+            if not isinstance(outbound, str) or not outbound.strip():
+                raise ValueError("兼容路由缺少出口")
+            outbound = outbound.strip()
+            if available is not None and outbound not in available:
+                raise ValueError(f"兼容路由出口不存在: {outbound}")
+        except ValueError:
+            if strict:
+                raise
+            continue
+        key = (kind, value, outbound)
+        if key not in seen:
+            seen.add(key)
+            routes.append({"type": kind, "value": value, "outbound": outbound})
+    return routes
 
 def _adblock_write_source_config(config):
     directory = os.path.dirname(ADBLOCK_SOURCES)
@@ -505,6 +582,8 @@ def _adblock_page():
     payload = _adblock_rules()
     stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
     generated = str(payload.get("generated_at") or "未同步") if isinstance(payload, dict) else "未同步"
+    source_config = _adblock_source_config()
+    compatibility_count = len(_adblock_compatibility_routes(source_config))
     text = ("🛡 <b>服务端去广告</b>\n"
             "普通 REJECT 规则由 mihomo 直接拦截；响应改写复用共享 CA。\n\n"
             f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
@@ -512,6 +591,8 @@ def _adblock_page():
             f"MITM 模块: {int(stats.get('source_count', 0) or 0)}  "
             f"主机: {int(stats.get('host_count', 0) or 0)}  "
             f"重写: {int(stats.get('rule_count', 0) or 0)}\n"
+            f"兼容旁路: {compatibility_count}  "
+            f"排除 MITM: {int(stats.get('excluded_host_count', 0) or 0)}\n"
             f"普通规则源: {int(stats.get('domain_source_count', 0) or 0)}  "
             f"REJECT: {int(stats.get('domain_rule_count', 0) or 0)}\n"
             f"未移植脚本: {int(stats.get('unported_scripts', 0) or 0)}  "
@@ -857,7 +938,12 @@ def _mihomo_config(c):
         else:
             proxies.append(_mihomo_proxy(o))
     wloc_enabled = _wloc_active()
-    adblock_hosts = _adblock_hosts() if _adblock_active() else []
+    adblock_enabled = _adblock_active()
+    adblock_hosts = _adblock_hosts() if adblock_enabled else []
+    compatibility_routes = []
+    if adblock_enabled:
+        compatibility_routes = _adblock_compatibility_routes(
+            _adblock_source_config(strict=True), c, strict=True)
     if wloc_enabled or adblock_hosts:
         proxies.append({"name": WLOC_OUTBOUND, "type": "http",
                         "server": "127.0.0.1", "port": WLOC_PORT})
@@ -883,12 +969,33 @@ def _mihomo_config(c):
     # Exact-domain rules must precede the server-IP reject rule. The phone sees the
     # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
     mitm_hosts = (list(WLOC_HOSTS) if wloc_enabled else []) + adblock_hosts
-    rules = ([f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT"]
-             if domain_rule_count and domain_mrs_rule_count else [])
+    rules = [f"{route['type'].upper()},{route['value']},{route['outbound']}"
+             for route in compatibility_routes]
+
+    # Force-gateway rule sets (for long-lived system services such as APNs) must
+    # precede REJECT and MITM rules, while remaining TLS pass-through.
+    for r in c.get("route", {}).get("rules", []):
+        if not r.get("force_gateway") or not r.get("outbound"):
+            continue
+        target = r["outbound"]
+        if r.get("rule_set"):
+            rules.append(f"RULE-SET,{r['rule_set']},{target}")
+        for d in r.get("domain", []):
+            rules.append(f"DOMAIN,{d},{target}")
+        for d in r.get("domain_suffix", []):
+            rules.append(f"DOMAIN-SUFFIX,{d},{target}")
+        for k in r.get("domain_keyword", []):
+            rules.append(f"DOMAIN-KEYWORD,{k},{target}")
+        for cidr in r.get("ip_cidr", []):
+            rules.append(f"IP-CIDR,{cidr},{target},no-resolve")
+    if domain_rule_count and domain_mrs_rule_count:
+        rules.append(f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT")
     if domain_rule_count and domain_classical_rule_count:
         rules.append(f"RULE-SET,{ADBLOCK_CLASSICAL_PROVIDER},REJECT")
     rules.extend(f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts))
     for r in c.get("route", {}).get("rules", []):
+        if r.get("force_gateway"):
+            continue
         target = r.get("outbound")
         if r.get("action") == "reject":
             for cidr in r.get("ip_cidr", []):
@@ -1001,6 +1108,15 @@ def _adblock_mosdns_ready():
     return all(marker in text for marker in
                ("tag: geosite_adblock", "tag: wloc_sequence", "qname $geosite_adblock"))
 
+def _force_proxy_mosdns_ready():
+    try:
+        text = open(MOSDNS_CONF).read()
+    except OSError:
+        return False
+    return all(marker in text for marker in
+               ("tag: geosite_force_proxy", "tag: wloc_sequence",
+                "qname $geosite_force_proxy"))
+
 def _wloc_write_domains(enabled):
     os.makedirs(os.path.dirname(WLOC_DOMAINS), exist_ok=True)
     tmp = WLOC_DOMAINS + ".tmp"
@@ -1063,6 +1179,8 @@ def _adblock_restore_runtime(config):
 
 def _adblock_sync_timeout():
     config = _adblock_source_config(strict=True)
+    _adblock_excluded_hosts(config, strict=True)
+    _adblock_compatibility_routes(config, load(), strict=True)
     counts = []
     for key in ("sources", "domain_sources"):
         count = sum(1 for item in config[key]
@@ -1093,7 +1211,11 @@ def _adblock_sync_rules():
     stats = payload.get("stats", {}) if isinstance(payload, dict) else {}
     hosts = _adblock_hosts()
     rewrite_count = int(stats.get("rule_count", 0) or 0)
-    if bool(hosts) != bool(rewrite_count):
+    declared_host_count = int(stats.get("declared_host_count", len(hosts)) or 0)
+    excluded_host_count = int(stats.get("excluded_host_count", 0) or 0)
+    all_hosts_excluded = (rewrite_count and not hosts and declared_host_count > 0
+                          and excluded_host_count == declared_host_count)
+    if bool(hosts) != bool(rewrite_count) and not all_hosts_excluded:
         return False, "MITM 精确主机和声明式规则不一致"
     domain_rule_count = int(stats.get("domain_rule_count", 0) or 0)
     domain_mrs_rule_count = int(stats.get("domain_mrs_rule_count", 0) or 0)
@@ -1244,6 +1366,7 @@ def enable_adblock():
                       f"{detail.get('source_count', 0)} 模块 / "
                       f"{detail.get('host_count', 0)} 主机 / "
                       f"{detail.get('rule_count', 0)} 规则\n"
+                      f"兼容排除: {detail.get('excluded_host_count', 0)} 主机\n"
                       f"普通 REJECT: {detail.get('domain_source_count', 0)} 源 / "
                       f"{detail.get('domain_rule_count', 0)} 规则\n"
                       f"未执行远程脚本: {detail.get('unported_scripts', 0)}")
@@ -1867,11 +1990,28 @@ def _save_rs_meta(m):
     os.makedirs(os.path.dirname(RS_META), exist_ok=True)
     json.dump(m, open(RS_META, "w"), ensure_ascii=False, indent=2)
 
-def _fetch_surge(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        text = r.read().decode("utf-8", "ignore")
+def _parse_surge_rules(text):
     dom, suf, kw, ip = [], [], [], []
+    # Accept normal line-oriented lists and compact one-line lists such as
+    # public APNs sources, where comments and rule tokens share a line.
+    token = re.compile(
+        r"(?<![A-Za-z0-9_-])(DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN|IP-CIDR6?|"
+        r"DOMAIN-WILDCARD)\s*,\s*([^\s,#]+)(?:\s*,\s*([^\s,#]+))?",
+        re.IGNORECASE,
+    )
+    matches = token.findall(str(text))
+    if matches:
+        for typ, value, _option in matches:
+            typ = typ.upper()
+            if typ == "DOMAIN":
+                dom.append(value)
+            elif typ == "DOMAIN-SUFFIX":
+                suf.append(value)
+            elif typ == "DOMAIN-KEYWORD":
+                kw.append(value)
+            elif typ in ("IP-CIDR", "IP-CIDR6"):
+                ip.append(value)
+        return dom, suf, kw, ip
     for line in text.splitlines():
         line = line.split("#", 1)[0].split("//", 1)[0].strip()
         if not line:
@@ -1888,6 +2028,13 @@ def _fetch_surge(url):
             ip.append(p[1])
     return dom, suf, kw, ip
 
+
+def _fetch_surge(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        text = r.read().decode("utf-8", "ignore")
+    return _parse_surge_rules(text)
+
 def _fetch_bytes(url):
     req = urllib.request.Request(url, headers={"User-Agent": "pdg-bot"})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -1902,25 +2049,124 @@ def _build_source(url, path):
     payload += [f"DOMAIN,{x}" for x in dom]
     payload += [f"DOMAIN-SUFFIX,{x}" for x in suf]
     payload += [f"DOMAIN-KEYWORD,{x}" for x in kw]
-    payload += [f"IP-CIDR,{x}" for x in ip]
+    payload += [f"{'IP-CIDR6' if ':' in x else 'IP-CIDR'},{x}" for x in ip]
     with open(path, "w") as f:
         f.write("payload:\n")
         for item in payload:
             f.write("  - " + item + "\n")
     return len(dom) + len(suf) + len(kw) + len(ip), (len(dom) + len(suf) + len(kw) == 0)
 
-def add_ruleset(url, target, label=""):
+def _force_gateway_domain_lines(c=None):
+    """Extract exact/suffix domains from rule sets marked force_gateway.
+
+    IP entries remain in the Mihomo provider; only domain entries can steer DNS
+    to the gateway before the normal China/Apple direct list.
+    """
+    c = load() if c is None else c
+    force_tags = {str(r.get("rule_set")) for r in c.get("route", {}).get("rules", [])
+                  if r.get("force_gateway") and r.get("rule_set")}
+    if not force_tags:
+        return []
+    meta = _rs_meta()
+    lines = set()
+    for tag in sorted(force_tags):
+        info = next((item for item in c.get("route", {}).get("rule_set", [])
+                     if item.get("tag") == tag), {})
+        path = info.get("path") or meta.get(tag, {}).get("path")
+        path = path or os.path.join(RS_DIR, tag + ".yaml")
+        if not str(path).startswith(RS_DIR + "/"):
+            raise ValueError(f"强制引流规则集路径不安全: {tag}")
+        if not os.path.exists(path):
+            raise ValueError(f"强制引流规则集文件缺失: {tag}")
+        for raw in open(path, encoding="utf-8"):
+            item = raw.strip()
+            if item.startswith("- "):
+                item = item[2:].strip().strip('"').strip("'")
+            fields = [field.strip() for field in item.split(",")]
+            if len(fields) < 2:
+                continue
+            kind = fields[0].upper()
+            if kind == "DOMAIN":
+                lines.add("full:" + _adblock_hostname(fields[1]))
+            elif kind == "DOMAIN-SUFFIX":
+                lines.add("domain:" + _adblock_hostname(fields[1].lstrip("+.")))
+    if force_tags and not lines:
+        raise ValueError("强制引流规则集没有可用于 DNS 的域名规则")
+    return sorted(lines)
+
+
+def _write_force_gateway_domains(c=None, restart=True):
+    try:
+        lines = _force_gateway_domain_lines(c)
+    except (OSError, ValueError) as exc:
+        return False, str(exc)
+    want = ("\n".join(lines) + "\n") if lines else ""
+    try:
+        previous = open(MOSDNS_FORCE_PROXY, "rb").read()
+    except OSError:
+        previous = None
+    if previous == want.encode():
+        return True, ""
+    os.makedirs(os.path.dirname(MOSDNS_FORCE_PROXY), mode=0o755, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".force-proxy-",
+                                     dir=os.path.dirname(MOSDNS_FORCE_PROXY), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(want)
+            file.flush(); os.fsync(file.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, MOSDNS_FORCE_PROXY)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    if not restart:
+        return True, ""
+    result = sh(["systemctl", "restart", "mosdns"])
+    if result.returncode == 0 and sh(["systemctl", "is-active", "mosdns"]).stdout.strip() == "active":
+        return True, ""
+    if previous is None:
+        try:
+            os.unlink(MOSDNS_FORCE_PROXY)
+        except OSError:
+            pass
+    else:
+        with open(MOSDNS_FORCE_PROXY, "wb") as file:
+            file.write(previous)
+    sh(["systemctl", "restart", "mosdns"])
+    return False, "mosdns 强制引流域名更新失败，已回滚"
+
+
+def add_ruleset(url, target, label="", force_gateway=False):
     c = load()
     if target not in exit_tags(c):
         return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))}"
+    if force_gateway and not _force_proxy_mosdns_ready():
+        return False, "mosdns 尚未安装强制网关分支，请先运行 sudo pdg update"
     low = url.lower().split("?", 1)[0]
     if low.endswith((".mrs", ".srs")):
         return False, "bot 目前只解析 .list/.txt 文本规则集；.mrs/.srs 可手写到 /etc/mihomo/config.yaml，但不会被 bot 管理。"
     name = "rs_" + hashlib.sha1(url.encode()).hexdigest()[:8]
     os.makedirs(RS_DIR, exist_ok=True)
+    previous_state = json.loads(json.dumps(c))
+    previous_meta = json.loads(json.dumps(_rs_meta()))
+    provider_path = os.path.join(RS_DIR, name + ".yaml")
+    previous_provider = None
+    if os.path.exists(provider_path):
+        try:
+            previous_provider = open(provider_path, "rb").read()
+        except OSError:
+            previous_provider = None
     try:
         path = os.path.join(RS_DIR, name + ".yaml"); fmt = "classical"
         count, ip_only = _build_source(url, path)
+        if force_gateway and not _force_gateway_domain_lines({
+                **c, "route": {**c.get("route", {}), "rule_set": [
+                    *c.get("route", {}).get("rule_set", []),
+                    {"tag": name, "path": path}],
+                "rules": [*c.get("route", {}).get("rules", []),
+                          {"rule_set": name, "force_gateway": True}],
+        }}):
+            raise ValueError("强制引流规则集没有可用于 DNS 的域名规则")
         warn = ("\n⚠️ 纯 IP 规则集: 透明代理能看到 IP 连接, 但无域名的 App 仍可能无法被精确分流。"
                 if ip_only else "")
     except Exception as e:  # noqa: BLE001
@@ -1929,19 +2175,41 @@ def add_ruleset(url, target, label=""):
     def mod(cc):
         cc["route"].setdefault("rule_set", [])
         cc["route"]["rule_set"] = [r for r in cc["route"]["rule_set"] if r.get("tag") != name]
-        cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": fmt, "path": path})
+        cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": fmt,
+                                          "path": path, **({"force_gateway": True} if force_gateway else {})})
         cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
         idx = 1 if cc["route"]["rules"] and cc["route"]["rules"][0].get("action") == "reject" else 0
-        cc["route"]["rules"].insert(idx, {"rule_set": name, "outbound": target})
+        cc["route"]["rules"].insert(idx, {
+            "rule_set": name, "outbound": target,
+            **({"force_gateway": True} if force_gateway else {}),
+        })
     ok, msg = apply_sb(mod)
     if ok:
         m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt,
-                                   "path": path, "count": count}
+                                   "path": path, "count": count,
+                                   **({"force_gateway": True} if force_gateway else {})}
         if label.strip():
             m[name]["label"] = label.strip()[:40]
         _save_rs_meta(m)
+        if force_gateway:
+            synced, sync_msg = _write_force_gateway_domains(load())
+            if not synced:
+                def restore(cc):
+                    cc.clear(); cc.update(previous_state)
+                apply_sb(restore)
+                if previous_provider is None:
+                    try:
+                        os.remove(provider_path)
+                    except OSError:
+                        pass
+                else:
+                    with open(provider_path, "wb") as file:
+                        file.write(previous_provider)
+                _save_rs_meta(previous_meta)
+                return False, sync_msg
         cntdesc = f"{count} 条"
-        return True, f"规则集已添加 → {target}（{cntdesc}，{label.strip() or name}）" + warn
+        mode = "；已加入强制网关透明转发" if force_gateway else ""
+        return True, f"规则集已添加 → {target}（{cntdesc}，{label.strip() or name}）" + mode + warn
     return False, msg
 
 def set_ruleset_label(name, label):
@@ -1963,7 +2231,20 @@ def _rs_items():
 
 def del_ruleset(name):
     m = _rs_meta(); info = m.get(name, {}); path = info.get("path")
+    current = load()
+    force_gateway = any(r.get("rule_set") == name and r.get("force_gateway")
+                        for r in current.get("route", {}).get("rules", []))
+    previous_meta = json.loads(json.dumps(m))
     label = info.get("label") or name              # 删前取显示名(删完 meta 就没了)
+    desired = json.loads(json.dumps(current))
+    desired["route"]["rule_set"] = [r for r in desired["route"].get("rule_set", [])
+                                      if r.get("tag") != name]
+    desired["route"]["rules"] = [r for r in desired["route"]["rules"]
+                                   if r.get("rule_set") != name]
+    if force_gateway:
+        synced, sync_msg = _write_force_gateway_domains(desired)
+        if not synced:
+            return False, sync_msg
     def mod(cc):
         cc["route"]["rule_set"] = [r for r in cc["route"].get("rule_set", []) if r.get("tag") != name]
         cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
@@ -1977,6 +2258,9 @@ def del_ruleset(name):
             except OSError:
                 pass
         return True, f"已删除规则集 {label}"
+    if force_gateway:
+        _write_force_gateway_domains(current)
+        _save_rs_meta(previous_meta)
     return False, msg
 
 def refresh_rulesets():
@@ -2029,6 +2313,16 @@ def refresh_rulesets():
             print("refresh rs: 新规则集致 mihomo 起不来, 已还原旧规则集并恢复")
         else:                             # 连旧档都起不来 → 保留 .bak 备查, 不再删
             print("refresh rs: 还原旧规则集后仍未 active, 保留 .bak 备查")
+        return 0
+    try:
+        synced, sync_msg = _write_force_gateway_domains(load())
+    except Exception as exc:  # noqa: BLE001
+        synced, sync_msg = False, str(exc)
+    if not synced:
+        for path, bak in swapped:
+            shutil.copy(bak, path)
+        sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
+        print("refresh rs: 强制网关域名同步失败, 已回滚: " + sync_msg)
         return 0
     for _, bak in swapped:                 # 确认 active 后再清备份
         try:
@@ -2579,13 +2873,14 @@ def _wloc_ca_profile():
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False)
 
 # ── 配置备份 / 恢复 ──
-BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, RS_META,
+BACKUP_FILES = [STATE, MIHOMO_CFG, MOSDNS_CONF, MOSDNS_DIRECT, MOSDNS_FORCE_PROXY, RS_META,
                 WLOC_PRESETS, ADBLOCK_SOURCES]
 RESTORE_MAP = {
     "etc/mihomo/state.json": STATE,
     "etc/mihomo/config.yaml": MIHOMO_CFG,
     "etc/mosdns/config.yaml": MOSDNS_CONF,
     "etc/mosdns/rules/custom_direct.txt": MOSDNS_DIRECT,
+    "etc/mosdns/rules/force_proxy.txt": MOSDNS_FORCE_PROXY,
     "opt/pdg-bot/rulesets.json": RS_META,
     "etc/privdns-gateway/wloc-presets.json": WLOC_PRESETS,
     "etc/privdns-gateway/adblock-sources.json": ADBLOCK_SOURCES,

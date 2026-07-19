@@ -452,6 +452,7 @@ cmd_update(){
     || install -o pdg-wloc -g pdg-wloc -m600 "$REPO_DIR"/deploy/mitm/adblock.json /var/lib/pdg-wloc/adblock.json
   [[ -f /etc/mosdns/rules/wloc.txt ]] || install -m644 /dev/null /etc/mosdns/rules/wloc.txt
   [[ -f /etc/mosdns/rules/adblock.txt ]] || install -m644 /dev/null /etc/mosdns/rules/adblock.txt
+  [[ -f /etc/mosdns/rules/force_proxy.txt ]] || install -m644 /dev/null /etc/mosdns/rules/force_proxy.txt
   install -d -m700 /etc/privdns-gateway
   [[ -f /etc/privdns-gateway/wloc-presets.json ]] \
     || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json

@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as td:
         "RULE-SET,__pdg_adblock_reject_classical,REJECT ads.example.com",
         encoding="utf-8")
     assert checks.check_adblock() == (
-        "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；普通 REJECT 3 条")
+        "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；排除 0 主机；普通 REJECT 3 条")
 
     Path(checks.ADBLOCK_RULES).write_text(json.dumps({
         "hosts": ["ads.example.com"],
@@ -86,6 +86,18 @@ with tempfile.TemporaryDirectory() as td:
     Path(checks.MIHOMO_CFG).write_text(
         "__pdg_wloc_mitm ads.example.com", encoding="utf-8")
     assert checks.check_adblock() == (
-        "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；普通 REJECT 0 条")
+        "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；排除 0 主机；普通 REJECT 0 条")
+
+    Path(checks.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": [], "excluded_hosts": ["api.example.com"],
+        "stats": {"source_count": 1, "host_count": 0, "declared_host_count": 1,
+                  "excluded_host_count": 1, "rule_count": 2,
+                  "domain_source_count": 0, "domain_rule_count": 0,
+                  "domain_mrs_rule_count": 0, "domain_classical_rule_count": 0},
+    }), encoding="utf-8")
+    Path(checks.ADBLOCK_DOMAINS).write_text("", encoding="utf-8")
+    Path(checks.MIHOMO_CFG).write_text("DOMAIN,api.example.com,residential", encoding="utf-8")
+    assert checks.check_adblock() == (
+        "ok", "去广告", "开启 → 1 模块 / 0 主机 / 2 重写；排除 1 主机；普通 REJECT 0 条")
 
 print("wloc-checks regression OK")

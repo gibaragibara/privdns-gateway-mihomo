@@ -29,6 +29,10 @@ plugins:
   - tag: geosite_wloc
     type: domain_set
     args: { files: ["/etc/mosdns/rules/wloc.txt"] }
+  # 强制网关透明转发域名(例如 APNs): 只引流, 不进入 MITM。
+  - tag: geosite_force_proxy
+    type: domain_set
+    args: { files: ["/etc/mosdns/rules/force_proxy.txt"] }
   # 声明式去广告精确主机集由 bot 同步；空文件=关闭，不扩大 MITM 范围。
   - tag: geosite_adblock
     type: domain_set
@@ -78,6 +82,8 @@ plugins:
     args:
       - exec: $lazy_cache
       - exec: jump has_resp
+      - matches: qname $geosite_force_proxy
+        exec: goto wloc_sequence
       - matches: qname $geosite_adblock
         exec: goto wloc_sequence
       - matches: qname $geosite_wloc

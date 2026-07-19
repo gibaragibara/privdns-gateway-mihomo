@@ -243,7 +243,11 @@ def check_adblock():
         hosts, stats = set(), {}
         problems.append("编译规则缺失/损坏")
     rewrite_count = int(stats.get("rule_count", 0) or 0)
-    if bool(hosts) != bool(rewrite_count):
+    declared_host_count = int(stats.get("declared_host_count", len(hosts)) or 0)
+    excluded_host_count = int(stats.get("excluded_host_count", 0) or 0)
+    all_hosts_excluded = (rewrite_count and not hosts and declared_host_count > 0
+                          and excluded_host_count == declared_host_count)
+    if bool(hosts) != bool(rewrite_count) and not all_hosts_excluded:
         problems.append("MITM 主机与重写规则不同步")
     if hosts and not active:
         problems.append("共享 MITM 未运行")
@@ -282,6 +286,7 @@ def check_adblock():
     return ("ok", "去广告",
             f"开启 → {stats.get('source_count', 0)} 模块 / "
             f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 重写；"
+            f"排除 {stats.get('excluded_host_count', 0)} 主机；"
             f"普通 REJECT {stats.get('domain_rule_count', 0)} 条")
 
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
