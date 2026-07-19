@@ -61,8 +61,11 @@ assert 'CONFIG_PATH = "/var/lib/pdg-wloc/wloc.json"' in addon
 assert "--scripts /opt/pdg-bot/wloc_mitm.py --scripts /opt/pdg-bot/adblock_mitm.py" in unit
 assert 'STATE_PATH = "/var/lib/pdg-wloc/adblock.json"' in adblock_addon
 assert 'RULES_PATH = "/var/lib/pdg-wloc/adblock-rules.json"' in adblock_addon
-assert 'ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"' in bot
+assert 'ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"' in bot
+assert 'ADBLOCK_CLASSICAL_PROVIDER_FILE = ' \
+       '"/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"' in bot
 assert "--domain-output" in bot
+assert "--classical-output" in bot
 assert "_mitm_set_service(_mitm_active())" in bot
 assert "_mitm_set_service(_wloc_active())" in bot or "_mitm_set_service(_mitm_active())" in bot
 assert "refresh_adblock" in scheduled, "daily timer must refresh REJECT and MITM adblock sources"

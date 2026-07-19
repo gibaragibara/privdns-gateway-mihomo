@@ -47,7 +47,8 @@ with tempfile.TemporaryDirectory() as td:
     bot.ADBLOCK_RULES = str(root / "adblock-rules.json")
     bot.ADBLOCK_DOMAINS = str(root / "adblock.txt")
     bot.ADBLOCK_SOURCES = str(root / "adblock-sources.json")
-    bot.ADBLOCK_DOMAIN_PROVIDER_FILE = str(root / "adblock-provider.yaml")
+    bot.ADBLOCK_DOMAIN_PROVIDER_FILE = str(root / "adblock-provider.mrs")
+    bot.ADBLOCK_CLASSICAL_PROVIDER_FILE = str(root / "adblock-classical.yaml")
     bot.MITM_LOCK_FILE = str(root / "pdg-mitm.lock")
     Path(bot.MOSDNS_CONF).write_text(
         "tag: geosite_wloc\ntag: geosite_adblock\ntag: wloc_sequence\n"
@@ -112,30 +113,45 @@ with tempfile.TemporaryDirectory() as td:
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({
         "hosts": ["ads.example.com"],
         "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
-        "stats": {"domain_rule_count": 2},
+        "stats": {"domain_rule_count": 2, "domain_mrs_rule_count": 1,
+                  "domain_classical_rule_count": 1},
     }), encoding="utf-8")
-    Path(bot.ADBLOCK_DOMAIN_PROVIDER_FILE).write_text(
-        'payload:\n  - "DOMAIN-SUFFIX,tracker.example"\n', encoding="utf-8")
+    Path(bot.ADBLOCK_DOMAIN_PROVIDER_FILE).write_bytes(b"mrs")
+    Path(bot.ADBLOCK_CLASSICAL_PROVIDER_FILE).write_text(
+        'payload:\n  - "DOMAIN-KEYWORD,-ad.example"\n', encoding="utf-8")
     combined = bot._mihomo_config(BASE)
-    assert combined["rule-providers"][bot.ADBLOCK_DOMAIN_PROVIDER]["path"] == \
-        bot.ADBLOCK_DOMAIN_PROVIDER_FILE
-    assert combined["rules"][:2] == [
+    assert combined["rule-providers"][bot.ADBLOCK_DOMAIN_PROVIDER] == {
+        "type": "file", "behavior": "domain", "format": "mrs",
+        "path": bot.ADBLOCK_DOMAIN_PROVIDER_FILE,
+    }
+    assert combined["rule-providers"][bot.ADBLOCK_CLASSICAL_PROVIDER] == {
+        "type": "file", "behavior": "classical",
+        "path": bot.ADBLOCK_CLASSICAL_PROVIDER_FILE,
+    }
+    assert combined["rules"][:3] == [
         f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
+        f"RULE-SET,{bot.ADBLOCK_CLASSICAL_PROVIDER},REJECT",
         f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
     ]
 
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({
-        "hosts": [], "rules": [], "stats": {"domain_rule_count": 2},
+        "hosts": [], "rules": [],
+        "stats": {"domain_rule_count": 2, "domain_mrs_rule_count": 1,
+                  "domain_classical_rule_count": 1},
     }), encoding="utf-8")
     normal_only = bot._mihomo_config(BASE)
     assert bot.WLOC_OUTBOUND not in [proxy["name"] for proxy in normal_only["proxies"]]
-    assert normal_only["rules"][0] == f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT"
+    assert normal_only["rules"][:2] == [
+        f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
+        f"RULE-SET,{bot.ADBLOCK_CLASSICAL_PROVIDER},REJECT",
+    ]
     assert not bot._mitm_active()
 
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({
         "hosts": ["ads.example.com"],
         "rules": [{"pattern": "^https://ads\\.example\\.com/", "action": "reject"}],
-        "stats": {"domain_rule_count": 2},
+        "stats": {"domain_rule_count": 2, "domain_mrs_rule_count": 1,
+                  "domain_classical_rule_count": 1},
     }), encoding="utf-8")
     bot._adblock_write_state(bot._adblock_default())
 
@@ -197,7 +213,9 @@ with tempfile.TemporaryDirectory() as td:
 
     bot._adblock_sync_rules = lambda: (True, {
         "source_count": 1, "host_count": 1, "rule_count": 1,
-        "domain_source_count": 1, "domain_rule_count": 2, "unported_scripts": 0,
+        "domain_source_count": 1, "domain_rule_count": 2,
+        "domain_mrs_rule_count": 1, "domain_classical_rule_count": 1,
+        "unported_scripts": 0,
     })
     events.clear()
     ok, _ = bot.enable_adblock()

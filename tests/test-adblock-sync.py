@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -80,6 +81,7 @@ assert parsed_domains["stats"]["unsupported_lines"] == 1
 
 classical = """
 DOMAIN,api.ads.example.com
+DOMAIN,api-noresolve.example.com,no-resolve
 DOMAIN-SUFFIX,ads.example.com
 DOMAIN-KEYWORD,-ad.example
 IP-CIDR,192.0.2.9/24,no-resolve
@@ -88,8 +90,9 @@ PROCESS-NAME,bad
 parsed_classical = sync.parse_domain_source(
     classical, "classical", "https://example.com/rules", "classical")
 assert parsed_classical["rules"] == [
-    "DOMAIN,api.ads.example.com", "DOMAIN-SUFFIX,ads.example.com",
-    "DOMAIN-KEYWORD,-ad.example", "IP-CIDR,192.0.2.0/24,no-resolve",
+    "DOMAIN,api.ads.example.com", "DOMAIN,api-noresolve.example.com",
+    "DOMAIN-SUFFIX,ads.example.com", "DOMAIN-KEYWORD,-ad.example",
+    "IP-CIDR,192.0.2.0/24,no-resolve",
 ]
 assert parsed_classical["stats"]["unsupported_lines"] == 1
 
@@ -102,9 +105,17 @@ compiled_domains = sync.compile_domain_sources(
 assert compiled_domains["stats"] == {
     "domain_source_count": 2,
     "domain_failed_sources": 0,
-    "domain_rule_count": 5,
+    "domain_rule_count": 6,
     "domain_unsupported_lines": 2,
 }
+domain_rules, classical_rules = sync.split_domain_rules(compiled_domains["rules"])
+assert domain_rules == [
+    ".ads.example.com", "exact.example.net", "api.ads.example.com",
+    "api-noresolve.example.com",
+]
+assert classical_rules == [
+    "DOMAIN-KEYWORD,-ad.example", "IP-CIDR,192.0.2.0/24,no-resolve",
+]
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
@@ -113,6 +124,39 @@ with tempfile.TemporaryDirectory() as td:
     assert provider.read_text(encoding="utf-8").startswith(
         'payload:\n  - "DOMAIN-SUFFIX,ads.example.com"\n')
     assert os.stat(provider).st_mode & 0o777 == 0o600
+
+    converter = root / "fake-mihomo"
+    converter.write_text(
+        "#!/bin/sh\n"
+        "test \"$1 $2 $3\" = \"convert-ruleset domain text\" || exit 2\n"
+        "cp \"$4\" \"$5\"\n",
+        encoding="utf-8",
+    )
+    converter.chmod(converter.stat().st_mode | stat.S_IXUSR)
+    mrs = root / "provider.mrs"
+    sync.atomic_write_domain_mrs(str(mrs), domain_rules, str(converter))
+    assert mrs.read_text(encoding="utf-8").splitlines() == domain_rules
+    assert os.stat(mrs).st_mode & 0o777 == 0o600
+
+    failing = root / "failing-mihomo"
+    failing.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+    failing.chmod(failing.stat().st_mode | stat.S_IXUSR)
+    mrs.write_bytes(b"previous")
+    try:
+        sync.atomic_write_domain_mrs(str(mrs), domain_rules, str(failing))
+    except sync.CompileError:
+        pass
+    else:
+        raise AssertionError("failed MRS conversion must be rejected")
+    assert mrs.read_bytes() == b"previous"
+
+    fallback = root / "classical.yaml"
+    sync.atomic_write_provider(str(fallback), classical_rules)
+    assert fallback.read_text(encoding="utf-8").splitlines() == [
+        "payload:",
+        '  - "DOMAIN-KEYWORD,-ad.example"',
+        '  - "IP-CIDR,192.0.2.0/24,no-resolve"',
+    ]
 
     current = root / "sources.json"
     defaults = root / "defaults.json"

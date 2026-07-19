@@ -45,7 +45,9 @@ ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
 ADBLOCK_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
 ADBLOCK_SYNC = "/opt/pdg-bot/sync_adblock.py"
 ADBLOCK_DOMAIN_PROVIDER = "__pdg_adblock_reject"
-ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"
+ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
+ADBLOCK_CLASSICAL_PROVIDER = "__pdg_adblock_reject_classical"
+ADBLOCK_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
@@ -787,14 +789,24 @@ def _mihomo_config(c):
         providers[name] = {"type": "file", "behavior": "classical", "path": _rule_provider_path(name, meta)}
     adblock_stats = _adblock_rules().get("stats", {}) if _adblock_active() else {}
     domain_rule_count = int(adblock_stats.get("domain_rule_count", 0) or 0)
-    if domain_rule_count:
+    domain_mrs_rule_count = int(adblock_stats.get("domain_mrs_rule_count", 0) or 0)
+    domain_classical_rule_count = int(adblock_stats.get("domain_classical_rule_count", 0) or 0)
+    if domain_rule_count and domain_mrs_rule_count:
         providers[ADBLOCK_DOMAIN_PROVIDER] = {
-            "type": "file", "behavior": "classical", "path": ADBLOCK_DOMAIN_PROVIDER_FILE,
+            "type": "file", "behavior": "domain", "format": "mrs",
+            "path": ADBLOCK_DOMAIN_PROVIDER_FILE,
+        }
+    if domain_rule_count and domain_classical_rule_count:
+        providers[ADBLOCK_CLASSICAL_PROVIDER] = {
+            "type": "file", "behavior": "classical", "path": ADBLOCK_CLASSICAL_PROVIDER_FILE,
         }
     # Exact-domain rules must precede the server-IP reject rule. The phone sees the
     # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
     mitm_hosts = (list(WLOC_HOSTS) if wloc_enabled else []) + adblock_hosts
-    rules = ([f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT"] if domain_rule_count else [])
+    rules = ([f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT"]
+             if domain_rule_count and domain_mrs_rule_count else [])
+    if domain_rule_count and domain_classical_rule_count:
+        rules.append(f"RULE-SET,{ADBLOCK_CLASSICAL_PROVIDER},REJECT")
     rules.extend(f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts))
     for r in c.get("route", {}).get("rules", []):
         target = r.get("outbound")
@@ -972,7 +984,8 @@ def _adblock_sync_rules():
     try:
         result = sh(["python3", ADBLOCK_SYNC, "--sources", ADBLOCK_SOURCES,
                      "--output", ADBLOCK_RULES,
-                     "--domain-output", ADBLOCK_DOMAIN_PROVIDER_FILE])
+                     "--domain-output", ADBLOCK_DOMAIN_PROVIDER_FILE,
+                     "--classical-output", ADBLOCK_CLASSICAL_PROVIDER_FILE])
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"规则同步失败: {exc}"
     if result.returncode != 0:
@@ -983,8 +996,16 @@ def _adblock_sync_rules():
     rewrite_count = int(stats.get("rule_count", 0) or 0)
     if bool(hosts) != bool(rewrite_count):
         return False, "MITM 精确主机和声明式规则不一致"
-    if not int(stats.get("domain_rule_count", 0) or 0) or not os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
+    domain_rule_count = int(stats.get("domain_rule_count", 0) or 0)
+    domain_mrs_rule_count = int(stats.get("domain_mrs_rule_count", 0) or 0)
+    domain_classical_rule_count = int(stats.get("domain_classical_rule_count", 0) or 0)
+    if (not domain_rule_count
+            or domain_rule_count != domain_mrs_rule_count + domain_classical_rule_count):
         return False, "规则同步完成但没有可用的普通 REJECT 规则"
+    if domain_mrs_rule_count and not os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
+        return False, "普通 REJECT MRS 规则缺失"
+    if domain_classical_rule_count and not os.path.exists(ADBLOCK_CLASSICAL_PROVIDER_FILE):
+        return False, "普通 REJECT 兼容规则缺失"
     return True, stats
 
 def _wloc_ensure_ca():
@@ -1064,29 +1085,32 @@ def enable_adblock():
             return False, "mosdns 尚未安装去广告分支，请先运行 sudo pdg update"
         previous = _adblock_load()
         backup = ADBLOCK_RULES + ".botbak"
-        provider_backup = ADBLOCK_DOMAIN_PROVIDER_FILE + ".botbak"
+        provider_files = (ADBLOCK_DOMAIN_PROVIDER_FILE, ADBLOCK_CLASSICAL_PROVIDER_FILE)
+        provider_backups = {path: path + ".botbak" for path in provider_files}
         had_rules = os.path.exists(ADBLOCK_RULES)
-        had_provider = os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE)
+        had_providers = {path: os.path.exists(path) for path in provider_files}
         if had_rules:
             shutil.copy2(ADBLOCK_RULES, backup)
             os.chmod(backup, 0o600)
         elif os.path.exists(backup):
             os.unlink(backup)
-        if had_provider:
-            shutil.copy2(ADBLOCK_DOMAIN_PROVIDER_FILE, provider_backup)
-            os.chmod(provider_backup, 0o600)
-        elif os.path.exists(provider_backup):
-            os.unlink(provider_backup)
+        for path, backup_path in provider_backups.items():
+            if had_providers[path]:
+                shutil.copy2(path, backup_path)
+                os.chmod(backup_path, 0o600)
+            elif os.path.exists(backup_path):
+                os.unlink(backup_path)
 
         def restore_files():
             if had_rules and os.path.exists(backup):
                 os.replace(backup, ADBLOCK_RULES)
             elif not had_rules and os.path.exists(ADBLOCK_RULES):
                 os.unlink(ADBLOCK_RULES)
-            if had_provider and os.path.exists(provider_backup):
-                os.replace(provider_backup, ADBLOCK_DOMAIN_PROVIDER_FILE)
-            elif not had_provider and os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
-                os.unlink(ADBLOCK_DOMAIN_PROVIDER_FILE)
+            for path, backup_path in provider_backups.items():
+                if had_providers[path] and os.path.exists(backup_path):
+                    os.replace(backup_path, path)
+                elif not had_providers[path] and os.path.exists(path):
+                    os.unlink(path)
 
         def restore():
             restore_files()
@@ -1115,7 +1139,7 @@ def enable_adblock():
         if not ok:
             restore()
             return False, msg
-        for path in (backup, provider_backup):
+        for path in (backup, *provider_backups.values()):
             if os.path.exists(path):
                 os.unlink(path)
         return True, ("✅ 服务端去广告已开启: "

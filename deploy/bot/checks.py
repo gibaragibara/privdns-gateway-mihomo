@@ -13,7 +13,8 @@ WLOC_CA = "/var/lib/pdg-wloc/mitmproxy/mitmproxy-ca-cert.cer"
 ADBLOCK_STATE = "/var/lib/pdg-wloc/adblock.json"
 ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
 ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
-ADBLOCK_DOMAIN_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"
+ADBLOCK_DOMAIN_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
+ADBLOCK_CLASSICAL_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 
 def _run(cmd, t=10):
     try:
@@ -257,16 +258,25 @@ def check_adblock():
     if not hosts and domains:
         problems.append("mosdns 去广告域名集未清空")
     domain_rules = int(stats.get("domain_rule_count", 0) or 0)
-    if not domain_rules or not os.path.exists(ADBLOCK_DOMAIN_PROVIDER):
+    domain_mrs_rules = int(stats.get("domain_mrs_rule_count", 0) or 0)
+    domain_classical_rules = int(stats.get("domain_classical_rule_count", 0) or 0)
+    if not domain_rules or domain_rules != domain_mrs_rules + domain_classical_rules:
+        problems.append("普通 REJECT provider 统计无效")
+    if domain_mrs_rules and not os.path.exists(ADBLOCK_DOMAIN_PROVIDER):
         problems.append("普通 REJECT provider 缺失")
+    if domain_classical_rules and not os.path.exists(ADBLOCK_CLASSICAL_PROVIDER):
+        problems.append("普通 REJECT 兼容 provider 缺失")
     try:
         mihomo = open(MIHOMO_CFG).read()
     except OSError:
         mihomo = ""
     if hosts and ("__pdg_wloc_mitm" not in mihomo or any(host not in mihomo for host in hosts)):
         problems.append("mihomo 去广告规则缺失")
-    if domain_rules and "__pdg_adblock_reject" not in mihomo:
+    if domain_mrs_rules and "RULE-SET,__pdg_adblock_reject,REJECT" not in mihomo:
         problems.append("mihomo 普通 REJECT 规则缺失")
+    if (domain_classical_rules
+            and "RULE-SET,__pdg_adblock_reject_classical,REJECT" not in mihomo):
+        problems.append("mihomo 普通 REJECT 兼容规则缺失")
     if problems:
         return ("fail", "去广告", "; ".join(problems))
     return ("ok", "去广告",

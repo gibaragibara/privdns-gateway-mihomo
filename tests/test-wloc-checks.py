@@ -22,7 +22,8 @@ with tempfile.TemporaryDirectory() as td:
     checks.ADBLOCK_STATE = str(root / "adblock.json")
     checks.ADBLOCK_RULES = str(root / "adblock-rules.json")
     checks.ADBLOCK_DOMAINS = str(root / "adblock.txt")
-    checks.ADBLOCK_DOMAIN_PROVIDER = str(root / "adblock-provider.yaml")
+    checks.ADBLOCK_DOMAIN_PROVIDER = str(root / "adblock-provider.mrs")
+    checks.ADBLOCK_CLASSICAL_PROVIDER = str(root / "adblock-classical.yaml")
 
     active = False
 
@@ -62,13 +63,17 @@ with tempfile.TemporaryDirectory() as td:
     Path(checks.ADBLOCK_RULES).write_text(json.dumps({
         "hosts": ["ads.example.com"],
         "stats": {"source_count": 1, "host_count": 1, "rule_count": 2,
-                  "domain_rule_count": 3},
+                  "domain_rule_count": 3, "domain_mrs_rule_count": 2,
+                  "domain_classical_rule_count": 1},
     }), encoding="utf-8")
     Path(checks.ADBLOCK_DOMAINS).write_text("full:ads.example.com\n", encoding="utf-8")
-    Path(checks.ADBLOCK_DOMAIN_PROVIDER).write_text(
-        'payload:\n  - "DOMAIN-SUFFIX,tracker.example"\n', encoding="utf-8")
+    Path(checks.ADBLOCK_DOMAIN_PROVIDER).write_bytes(b"mrs")
+    Path(checks.ADBLOCK_CLASSICAL_PROVIDER).write_text(
+        'payload:\n  - "DOMAIN-KEYWORD,-ad.example"\n', encoding="utf-8")
     Path(checks.MIHOMO_CFG).write_text(
-        "__pdg_wloc_mitm __pdg_adblock_reject ads.example.com", encoding="utf-8")
+        "__pdg_wloc_mitm RULE-SET,__pdg_adblock_reject,REJECT "
+        "RULE-SET,__pdg_adblock_reject_classical,REJECT ads.example.com",
+        encoding="utf-8")
     assert checks.check_adblock() == (
         "ok", "去广告", "开启 → 1 模块 / 1 主机 / 2 重写；普通 REJECT 3 条")
 

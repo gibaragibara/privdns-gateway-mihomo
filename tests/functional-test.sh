@@ -51,6 +51,15 @@ for port in 19081 19082; do
   [[ "$ready" == 1 ]] || fail "mock SOCKS :$port 未就绪"
 done
 
+printf '%s\n' '.blocked.example' > "$WORK/adblock-domain.txt"
+"$MIHOMO" convert-ruleset domain text \
+  "$WORK/adblock-domain.txt" "$WORK/adblock-domain.mrs" \
+  || fail "MRS 规则转换失败"
+cat > "$WORK/adblock-classical.yaml" <<'YAML'
+payload:
+  - DOMAIN-KEYWORD,blocked-keyword
+YAML
+
 cat > "$WORK/config.yaml" <<'YAML'
 mixed-port: 18443
 allow-lan: false
@@ -66,7 +75,19 @@ proxies:
     type: socks5
     server: 127.0.0.1
     port: 19082
+rule-providers:
+  adblock-domain:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./adblock-domain.mrs
+  adblock-classical:
+    type: file
+    behavior: classical
+    path: ./adblock-classical.yaml
 rules:
+  - RULE-SET,adblock-domain,REJECT
+  - RULE-SET,adblock-classical,REJECT
   - DOMAIN-SUFFIX,ai.example,a
   - DOMAIN-SUFFIX,media.example,b
   - MATCH,a
@@ -97,6 +118,8 @@ PY
 
 connect_host foo.ai.example
 connect_host cdn.media.example
+connect_host ads.blocked.example
+connect_host cdn.blocked-keyword.example
 for _ in $(seq 1 30); do
   [[ -f "$WORK/a.log" && -f "$WORK/b.log" ]] && break
   sleep 0.1
@@ -104,4 +127,8 @@ done
 
 grep -q 'foo.ai.example:443' "$WORK/a.log" || { cat "$WORK/mihomo.out" >&2; fail "ai.example 未走出口 a"; }
 grep -q 'cdn.media.example:443' "$WORK/b.log" || { cat "$WORK/mihomo.out" >&2; fail "media.example 未走出口 b"; }
-echo "✅ mihomo 域名分流功能测试通过"
+if grep -qE 'blocked\.example:443|blocked-keyword\.example:443' "$WORK/a.log" "$WORK/b.log"; then
+  cat "$WORK/mihomo.out" >&2
+  fail "MRS/classical REJECT 未拦截测试域名"
+fi
+echo "✅ mihomo 域名分流与 MRS/classical REJECT 功能测试通过"

@@ -19,7 +19,8 @@ from collections import Counter
 
 DEFAULT_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
 DEFAULT_OUTPUT = "/var/lib/pdg-wloc/adblock-rules.json"
-DEFAULT_DOMAIN_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject.yaml"
+DEFAULT_DOMAIN_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
+DEFAULT_CLASSICAL_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 USER_AGENT = "Egern/1.22.0 CFNetwork/1498.700.2 Darwin/23.6.0"
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_DOMAIN_SOURCE_BYTES = 16 * 1024 * 1024
@@ -311,7 +312,8 @@ def _classical_rule(line):
         if (kind == "IP-CIDR") != (network.version == 4):
             raise CompileError("IP rule family mismatch")
         value = str(network)
-    suffix = ",no-resolve" if any(field.lower() == "no-resolve" for field in fields[2:]) else ""
+    suffix = (",no-resolve" if kind in {"IP-CIDR", "IP-CIDR6"}
+              and any(field.lower() == "no-resolve" for field in fields[2:]) else "")
     return f"{kind},{value}{suffix}"
 
 
@@ -385,6 +387,31 @@ def compile_domain_sources(config, fetcher=fetch_domain_text):
     }
 
 
+def split_domain_rules(rules):
+    """Split rules into mihomo's optimized domain format and classical fallback."""
+    domains = []
+    classical = []
+    seen_domains = set()
+    seen_classical = set()
+    for rule in rules:
+        fields = str(rule).split(",")
+        kind = fields[0]
+        value = fields[1] if len(fields) > 1 else ""
+        if kind == "DOMAIN":
+            converted = value
+        elif kind == "DOMAIN-SUFFIX":
+            converted = "." + value
+        else:
+            if rule not in seen_classical:
+                seen_classical.add(rule)
+                classical.append(rule)
+            continue
+        if converted not in seen_domains:
+            seen_domains.add(converted)
+            domains.append(converted)
+    return domains, classical
+
+
 def atomic_write(path, payload, owner="pdg-wloc"):
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, mode=0o755, exist_ok=True)
@@ -425,6 +452,37 @@ def atomic_write_provider(path, rules):
             os.unlink(temporary)
 
 
+def atomic_write_domain_mrs(path, domains, converter="mihomo"):
+    if not domains:
+        raise CompileError("no domain rules available for MRS conversion")
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    source_fd, source = tempfile.mkstemp(prefix=".adblock-domain-", dir=directory, text=True)
+    target_fd, target = tempfile.mkstemp(prefix=".adblock-mrs-", dir=directory)
+    os.close(target_fd)
+    try:
+        with os.fdopen(source_fd, "w", encoding="utf-8") as file:
+            file.write("\n".join(domains) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        try:
+            result = subprocess.run(
+                [converter, "convert-ruleset", "domain", "text", source, target],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CompileError(f"MRS conversion failed: {exc}") from exc
+        if result.returncode or not os.path.exists(target) or not os.path.getsize(target):
+            detail = (result.stdout + result.stderr).decode("utf-8", "replace").strip()[-200:]
+            raise CompileError("MRS conversion failed" + ((": " + detail) if detail else ""))
+        os.chmod(target, 0o600)
+        os.replace(target, path)
+    finally:
+        for temporary in (source, target):
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
 def merge_source_defaults(path, defaults_path):
     with open(path, encoding="utf-8") as file:
         current = json.load(file)
@@ -462,6 +520,8 @@ def main():
     parser.add_argument("--sources", default=DEFAULT_SOURCES)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--domain-output", default=DEFAULT_DOMAIN_OUTPUT)
+    parser.add_argument("--classical-output", default=DEFAULT_CLASSICAL_OUTPUT)
+    parser.add_argument("--mihomo", default="mihomo")
     parser.add_argument("--merge-defaults")
     parser.add_argument("--merge-only", action="store_true")
     parser.add_argument("--check-module-url")
@@ -497,7 +557,12 @@ def main():
     compiled["domain_sources"] = domain["sources"]
     compiled["domain_failures"] = domain["failures"]
     compiled["stats"].update(domain["stats"])
-    atomic_write_provider(args.domain_output, domain["rules"])
+    domains, classical = split_domain_rules(domain["rules"])
+    compiled["stats"]["domain_mrs_rule_count"] = len(domains)
+    compiled["stats"]["domain_classical_rule_count"] = len(classical)
+    if domains:
+        atomic_write_domain_mrs(args.domain_output, domains, args.mihomo)
+    atomic_write_provider(args.classical_output, classical)
     atomic_write(args.output, compiled)
     print(json.dumps(compiled["stats"], ensure_ascii=False, sort_keys=True))
 

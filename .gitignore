@@ -17,6 +17,14 @@ venv/
 *.generated.lua
 *.generated.json
 
+# 运行时下载/编译的第三方规则和插件缓存
+*.mrs
+__pdg_adblock_reject*.yaml
+adblock-rules.json
+*.lpx
+*.sgmodule
+*.plugin
+
 # 机密: 真实 IP / 密码 / 证书不要进版本库
 config/pdg.local.conf
 *.pem
