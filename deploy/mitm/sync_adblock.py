@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.parse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
 DEFAULT_OUTPUT = "/var/lib/pdg-wloc/adblock-rules.json"
@@ -24,6 +25,13 @@ DEFAULT_CLASSICAL_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 USER_AGENT = "Egern/1.22.0 CFNetwork/1498.700.2 Darwin/23.6.0"
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_DOMAIN_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_DOMAIN_JSON_CHARS = 8 * 1024 * 1024
+MAX_ADBLOCK_SOURCES = 64
+MAX_DOMAIN_SOURCE_LINES = 500_000
+MAX_DOMAIN_RULES_PER_SOURCE = 400_000
+MAX_DOMAIN_RULES_TOTAL = 600_000
+MAX_DOMAIN_LINE_CHARS = 4096
+SOURCE_FETCH_WORKERS = 4
 SUPPORTED_ACTIONS = {
     "reject", "reject-200", "reject-dict", "reject-img",
     "mock-response-body", "response-body-json-del",
@@ -237,34 +245,51 @@ def parse_module(text, name, source_url=""):
     }
 
 
-def compile_sources(config, fetcher=fetch_text):
-    items = config.get("sources", []) if isinstance(config, dict) else []
+def _enabled_source_items(config, key):
+    items = config.get(key, []) if isinstance(config, dict) else []
     if not isinstance(items, list):
-        raise CompileError("sources must be a list")
+        raise CompileError(f"{key} must be a list")
+    enabled = [item for item in items
+               if isinstance(item, dict) and item.get("enabled", True)]
+    if len(enabled) > MAX_ADBLOCK_SOURCES:
+        raise CompileError(f"{key} exceeds the {MAX_ADBLOCK_SOURCES}-source limit")
+    return enabled
+
+
+def _fetched_source_batches(items, fetcher):
+    for offset in range(0, len(items), SOURCE_FETCH_WORKERS):
+        batch = items[offset:offset + SOURCE_FETCH_WORKERS]
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            pending = [(item, executor.submit(fetcher, str(item.get("url") or "")))
+                       for item in batch]
+            yield pending
+
+
+def compile_sources(config, fetcher=fetch_text):
+    items = _enabled_source_items(config, "sources")
     compiled_sources = []
     rules = []
     hosts = set()
     seen_rules = set()
     failures = []
-    for item in items:
-        if not isinstance(item, dict) or not item.get("enabled", True):
-            continue
-        name = str(item.get("name") or "unnamed")[:80]
-        url = str(item.get("url") or "")
-        try:
-            module = parse_module(fetcher(url), name, url)
-        except Exception as exc:  # one unavailable source must not discard the others
-            failures.append({"name": name, "error": str(exc)[:200]})
-            continue
-        compiled_sources.append({key: module[key] for key in ("name", "url", "stats")})
-        if not module["rules"]:
-            continue
-        hosts.update(module["hosts"])
-        for rule in module["rules"]:
-            key = json.dumps(rule, ensure_ascii=False, sort_keys=True)
-            if key not in seen_rules:
-                seen_rules.add(key)
-                rules.append(rule)
+    for batch in _fetched_source_batches(items, fetcher):
+        for item, future in batch:
+            name = str(item.get("name") or "unnamed")[:80]
+            url = str(item.get("url") or "")
+            try:
+                module = parse_module(future.result(), name, url)
+            except Exception as exc:  # one unavailable source must not discard the others
+                failures.append({"name": name, "error": str(exc)[:200]})
+                continue
+            compiled_sources.append({key: module[key] for key in ("name", "url", "stats")})
+            if not module["rules"]:
+                continue
+            hosts.update(module["hosts"])
+            for rule in module["rules"]:
+                key = json.dumps(rule, ensure_ascii=False, sort_keys=True)
+                if key not in seen_rules:
+                    seen_rules.add(key)
+                    rules.append(rule)
     stats = {
         "source_count": len(compiled_sources),
         "failed_sources": len(failures),
@@ -354,10 +379,26 @@ def _yaml_scalar(value):
     return value
 
 
+def _domain_source_lines(text):
+    text = str(text)
+    line_count = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+    if line_count > MAX_DOMAIN_SOURCE_LINES:
+        raise CompileError(
+            f"domain source exceeds the {MAX_DOMAIN_SOURCE_LINES}-line limit")
+    lines = text.split("\n")
+    if any(len(line) > MAX_DOMAIN_LINE_CHARS for line in lines):
+        raise CompileError(
+            f"domain source contains a line longer than {MAX_DOMAIN_LINE_CHARS} characters")
+    return lines
+
+
 def _auto_source_entries(text):
     text = str(text)
     stripped = text.lstrip()
     if stripped.startswith(("{", "[")):
+        if len(stripped) > MAX_DOMAIN_JSON_CHARS:
+            raise CompileError(
+                f"JSON domain source exceeds {MAX_DOMAIN_JSON_CHARS // (1024 * 1024)} MiB")
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
@@ -365,10 +406,13 @@ def _auto_source_entries(text):
         if isinstance(payload, dict):
             payload = payload.get("payload")
         if isinstance(payload, list):
+            if len(payload) > MAX_DOMAIN_SOURCE_LINES:
+                raise CompileError(
+                    f"domain source exceeds the {MAX_DOMAIN_SOURCE_LINES}-entry limit")
             entries = [item for item in payload if isinstance(item, str)]
             return entries, len(payload) - len(entries)
 
-    lines = text.splitlines()
+    lines = _domain_source_lines(text)
     payload_index = None
     payload_indent = 0
     for index, raw in enumerate(lines):
@@ -415,9 +459,13 @@ def parse_domain_source(text, name, source_url="", source_format="classical"):
     if source_format not in {"auto", "classical", "domain-set"}:
         raise CompileError(f"unsupported domain source format {source_format}")
     rules = []
+    seen = set()
     entries, unsupported = (_auto_source_entries(text) if source_format == "auto"
-                            else (str(text).splitlines(), 0))
+                            else (_domain_source_lines(text), 0))
     for raw in entries:
+        if len(raw) > MAX_DOMAIN_LINE_CHARS:
+            raise CompileError(
+                f"domain source contains an entry longer than {MAX_DOMAIN_LINE_CHARS} characters")
         line = raw.strip()
         if not line or line.startswith(("#", ";", "!", "//")):
             continue
@@ -433,6 +481,12 @@ def parse_domain_source(text, name, source_url="", source_format="classical"):
         except CompileError:
             unsupported += 1
             continue
+        if rule in seen:
+            continue
+        if len(rules) >= MAX_DOMAIN_RULES_PER_SOURCE:
+            raise CompileError(
+                f"domain source exceeds the {MAX_DOMAIN_RULES_PER_SOURCE}-rule limit")
+        seen.add(rule)
         rules.append(rule)
     if not rules:
         raise CompileError("domain source contains no supported rules")
@@ -446,27 +500,28 @@ def parse_domain_source(text, name, source_url="", source_format="classical"):
 
 
 def compile_domain_sources(config, fetcher=fetch_domain_text):
-    items = config.get("domain_sources", []) if isinstance(config, dict) else []
-    if not isinstance(items, list):
-        raise CompileError("domain_sources must be a list")
+    items = _enabled_source_items(config, "domain_sources")
     sources = []
     failures = []
     rules = []
     seen = set()
-    for item in items:
-        if not isinstance(item, dict) or not item.get("enabled", True):
-            continue
-        name = str(item.get("name") or "unnamed")[:80]
-        url = str(item.get("url") or "")
-        try:
-            source = parse_domain_source(
-                fetcher(url), name, url, item.get("format", "auto"))
-        except Exception as exc:
-            failures.append({"name": name, "error": str(exc)[:200]})
-            continue
-        sources.append({key: source[key] for key in ("name", "url", "format", "stats")})
-        for rule in source["rules"]:
-            if rule not in seen:
+    for batch in _fetched_source_batches(items, fetcher):
+        for item, future in batch:
+            name = str(item.get("name") or "unnamed")[:80]
+            url = str(item.get("url") or "")
+            try:
+                source = parse_domain_source(
+                    future.result(), name, url, item.get("format", "auto"))
+            except Exception as exc:
+                failures.append({"name": name, "error": str(exc)[:200]})
+                continue
+            sources.append({key: source[key] for key in ("name", "url", "format", "stats")})
+            for rule in source["rules"]:
+                if rule in seen:
+                    continue
+                if len(rules) >= MAX_DOMAIN_RULES_TOTAL:
+                    raise CompileError(
+                        f"compiled domain rules exceed the {MAX_DOMAIN_RULES_TOTAL}-rule limit")
                 seen.add(rule)
                 rules.append(rule)
     return {

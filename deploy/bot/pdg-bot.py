@@ -48,6 +48,8 @@ ADBLOCK_DOMAIN_PROVIDER = "__pdg_adblock_reject"
 ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
 ADBLOCK_CLASSICAL_PROVIDER = "__pdg_adblock_reject_classical"
 ADBLOCK_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
+ADBLOCK_SOURCE_LIMIT = 64
+ADBLOCK_FETCH_WORKERS = 4
 MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
@@ -278,15 +280,27 @@ def _adblock_hosts():
                                    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
                                    str(host).strip().lower())})
 
-def _adblock_source_config():
+def _adblock_source_config(strict=False):
+    empty = {"sources": [], "domain_sources": []}
     try:
-        config = json.load(open(ADBLOCK_SOURCES))
-    except Exception:  # noqa: BLE001
-        return {"sources": [], "domain_sources": []}
+        with open(ADBLOCK_SOURCES, encoding="utf-8") as file:
+            config = json.load(file)
+    except FileNotFoundError:
+        return empty
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise ValueError("去广告来源配置损坏或不可读，已拒绝覆盖；请先恢复配置") from exc
+        return empty
     if not isinstance(config, dict):
-        return {"sources": [], "domain_sources": []}
+        if strict:
+            raise ValueError("去广告来源配置不是 JSON 对象，已拒绝覆盖；请先恢复配置")
+        return empty
     for key in ("sources", "domain_sources"):
-        if not isinstance(config.get(key), list):
+        if key not in config:
+            config[key] = []
+        elif not isinstance(config[key], list):
+            if strict:
+                raise ValueError(f"去广告来源配置中的 {key} 不是列表，已拒绝覆盖")
             config[key] = []
     return config
 
@@ -650,8 +664,8 @@ def is_busy(chat, mid):
     with _BUSY_LOCK:
         return (chat, mid) in _BUSY
 
-def sh(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+def sh(cmd, timeout=180):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 # ── clash_api (mihomo external-controller) ──
 def clash_get(path):
@@ -1046,13 +1060,32 @@ def _adblock_restore_runtime(config):
     _wloc_restart_mosdns()
     _mitm_set_service(_mitm_active())
 
+
+def _adblock_sync_timeout():
+    config = _adblock_source_config(strict=True)
+    counts = []
+    for key in ("sources", "domain_sources"):
+        count = sum(1 for item in config[key]
+                    if isinstance(item, dict) and item.get("enabled", True))
+        if count > ADBLOCK_SOURCE_LIMIT:
+            raise ValueError(f"去广告来源配置中的 {key} 超过 {ADBLOCK_SOURCE_LIMIT} 个")
+        counts.append(count)
+    module_batches = math.ceil(counts[0] / ADBLOCK_FETCH_WORKERS)
+    domain_batches = math.ceil(counts[1] / ADBLOCK_FETCH_WORKERS)
+    # Four downloads run concurrently per compiler batch. Leave enough time for
+    # every curl deadline, the 120-second MRS conversion, and process overhead.
+    return max(180, 240 + module_batches * 30 + domain_batches * 50)
+
+
 def _adblock_sync_rules():
     try:
+        timeout = _adblock_sync_timeout()
         result = sh(["python3", ADBLOCK_SYNC, "--sources", ADBLOCK_SOURCES,
                      "--output", ADBLOCK_RULES,
                      "--domain-output", ADBLOCK_DOMAIN_PROVIDER_FILE,
-                     "--classical-output", ADBLOCK_CLASSICAL_PROVIDER_FILE])
-    except (OSError, subprocess.SubprocessError) as exc:
+                     "--classical-output", ADBLOCK_CLASSICAL_PROVIDER_FILE],
+                    timeout=timeout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return False, f"规则同步失败: {exc}"
     if result.returncode != 0:
         return False, "规则同步失败: " + (result.stdout + result.stderr)[-400:]
@@ -1251,12 +1284,15 @@ def add_adblock_plugin(url):
     if not ok:
         return False, detail
     with _mitm_config_lock():
-        config = _adblock_source_config()
+        try:
+            config = _adblock_source_config(strict=True)
+        except ValueError as exc:
+            return False, str(exc)
         sources = _adblock_module_sources(config)
         if any(item["url"] == url for item in sources):
             return False, "这个插件 URL 已存在"
-        if len(sources) >= 64:
-            return False, "MITM 插件最多 64 个"
+        if len(sources) >= ADBLOCK_SOURCE_LIMIT:
+            return False, f"MITM 插件最多 {ADBLOCK_SOURCE_LIMIT} 个"
         previous = json.loads(json.dumps(config))
         config["sources"].append({
             "name": _adblock_plugin_name(url), "url": url, "enabled": True,
@@ -1273,7 +1309,10 @@ def add_adblock_plugin(url):
 
 def delete_adblock_plugin(source_id):
     with _mitm_config_lock():
-        config = _adblock_source_config()
+        try:
+            config = _adblock_source_config(strict=True)
+        except ValueError as exc:
+            return False, str(exc)
         previous = json.loads(json.dumps(config))
         removed = None
         kept = []
@@ -1304,12 +1343,15 @@ def add_adblock_domain_source(url):
     if not ok:
         return False, detail
     with _mitm_config_lock():
-        config = _adblock_source_config()
+        try:
+            config = _adblock_source_config(strict=True)
+        except ValueError as exc:
+            return False, str(exc)
         if any(str(item.get("url") or "").strip() == url
                for item in config.get("domain_sources", []) if isinstance(item, dict)):
             return False, "这个规则源 URL 已存在"
-        if len(_adblock_domain_sources(config)) >= 64:
-            return False, "普通 REJECT 规则源最多 64 个"
+        if len(_adblock_domain_sources(config)) >= ADBLOCK_SOURCE_LIMIT:
+            return False, f"普通 REJECT 规则源最多 {ADBLOCK_SOURCE_LIMIT} 个"
         previous = json.loads(json.dumps(config))
         config["domain_sources"].append({
             "name": _adblock_domain_name(url), "url": url,
@@ -1331,7 +1373,10 @@ def add_adblock_domain_source(url):
 
 def delete_adblock_domain_source(source_id):
     with _mitm_config_lock():
-        config = _adblock_source_config()
+        try:
+            config = _adblock_source_config(strict=True)
+        except ValueError as exc:
+            return False, str(exc)
         previous = json.loads(json.dumps(config))
         removed = None
         kept = []

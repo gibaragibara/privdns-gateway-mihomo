@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,25 @@ assert compiled["stats"]["host_count"] == 1
 assert compiled["stats"]["rule_count"] == 4
 assert compiled["stats"]["unported_scripts"] == 1
 assert compiled["failures"] == []
+
+barrier = threading.Barrier(sync.SOURCE_FETCH_WORKERS)
+worker_ids = set()
+worker_lock = threading.Lock()
+
+
+def concurrent_fetch(_url):
+    with worker_lock:
+        worker_ids.add(threading.get_ident())
+    barrier.wait(timeout=10)
+    return MODULE
+
+
+parallel = sync.compile_sources({"sources": [
+    {"name": str(index), "url": f"https://example.com/{index}"}
+    for index in range(sync.SOURCE_FETCH_WORKERS)
+]}, fetcher=concurrent_fetch)
+assert parallel["stats"]["source_count"] == sync.SOURCE_FETCH_WORKERS
+assert len(worker_ids) == sync.SOURCE_FETCH_WORKERS
 
 partial = sync.compile_sources({"sources": [
     {"name": "one", "url": "https://example.com/one"},
@@ -118,6 +138,32 @@ assert parsed_auto["rules"] == [
 ]
 assert parsed_auto["stats"]["unsupported_lines"] == 1
 
+deduplicated = sync.parse_domain_source(
+    "duplicate.example\n" * 1000, "duplicates", "", "auto")
+assert deduplicated["rules"] == ["DOMAIN,duplicate.example"]
+
+original_line_limit = sync.MAX_DOMAIN_SOURCE_LINES
+sync.MAX_DOMAIN_SOURCE_LINES = 2
+try:
+    sync.parse_domain_source("one.example\ntwo.example\nthree.example", "dense", "", "auto")
+except sync.CompileError as exc:
+    assert "line limit" in str(exc)
+else:
+    raise AssertionError("dense source must be rejected before splitting into an unbounded list")
+finally:
+    sync.MAX_DOMAIN_SOURCE_LINES = original_line_limit
+
+original_source_rule_limit = sync.MAX_DOMAIN_RULES_PER_SOURCE
+sync.MAX_DOMAIN_RULES_PER_SOURCE = 2
+try:
+    sync.parse_domain_source("one.example\ntwo.example\nthree.example", "large", "", "auto")
+except sync.CompileError as exc:
+    assert "rule limit" in str(exc)
+else:
+    raise AssertionError("per-source rule limit must be enforced")
+finally:
+    sync.MAX_DOMAIN_RULES_PER_SOURCE = original_source_rule_limit
+
 yaml_provider = """
 name: synthetic
 payload:
@@ -172,6 +218,35 @@ assert auto_domains == [
     ".tracker.auto.example", "*.wild.auto.example",
 ]
 assert auto_classical == ["DOMAIN-KEYWORD,ad-token"]
+
+original_total_rule_limit = sync.MAX_DOMAIN_RULES_TOTAL
+sync.MAX_DOMAIN_RULES_TOTAL = 2
+try:
+    sync.compile_domain_sources({"domain_sources": [
+        {"name": "one", "url": "https://example.com/one"},
+        {"name": "two", "url": "https://example.com/two"},
+    ]}, fetcher=lambda url: ("one.example\ntwo.example" if url.endswith("one")
+                            else "three.example"))
+except sync.CompileError as exc:
+    assert "compiled domain rules" in str(exc)
+else:
+    raise AssertionError("combined rule limit must be enforced")
+finally:
+    sync.MAX_DOMAIN_RULES_TOTAL = original_total_rule_limit
+
+original_source_limit = sync.MAX_ADBLOCK_SOURCES
+sync.MAX_ADBLOCK_SOURCES = 1
+try:
+    sync.compile_domain_sources({"domain_sources": [
+        {"url": "https://example.com/one"},
+        {"url": "https://example.com/two"},
+    ]}, fetcher=lambda _url: "one.example")
+except sync.CompileError as exc:
+    assert "source limit" in str(exc)
+else:
+    raise AssertionError("source count limit must be enforced")
+finally:
+    sync.MAX_ADBLOCK_SOURCES = original_source_limit
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)

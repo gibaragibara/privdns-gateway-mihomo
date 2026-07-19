@@ -85,6 +85,36 @@ with tempfile.TemporaryDirectory() as td:
     assert not ok
     ok, _ = bot.delete_adblock_domain_source(bot._adblock_source_id(domain_url))
     assert ok and len(bot._adblock_domain_sources()) == 1
+
+    valid_sources = Path(bot.ADBLOCK_SOURCES).read_bytes()
+    Path(bot.ADBLOCK_SOURCES).write_text("{broken json", encoding="utf-8")
+    damaged_sources = Path(bot.ADBLOCK_SOURCES).read_bytes()
+    ok, message = bot.add_adblock_domain_source("https://example.com/must-not-overwrite.list")
+    assert not ok and "拒绝覆盖" in message
+    assert Path(bot.ADBLOCK_SOURCES).read_bytes() == damaged_sources
+    ok, message = bot.delete_adblock_domain_source(
+        bot._adblock_source_id("https://example.com/reject.list"))
+    assert not ok and "拒绝覆盖" in message
+    assert Path(bot.ADBLOCK_SOURCES).read_bytes() == damaged_sources
+    original_sh = bot.sh
+    sync_commands = []
+    bot.sh = lambda *args, **kwargs: sync_commands.append((args, kwargs))
+    ok, message = bot._adblock_sync_rules()
+    assert not ok and "规则同步失败" in message and not sync_commands
+    bot.sh = original_sh
+    Path(bot.ADBLOCK_SOURCES).write_bytes(valid_sources)
+
+    assert bot._adblock_sync_timeout() == 320
+    large_source_config = {
+        "sources": [{"url": f"https://example.com/module-{index}.lpx"}
+                    for index in range(bot.ADBLOCK_SOURCE_LIMIT)],
+        "domain_sources": [{"url": f"https://example.com/rules-{index}.list"}
+                           for index in range(bot.ADBLOCK_SOURCE_LIMIT)],
+    }
+    Path(bot.ADBLOCK_SOURCES).write_text(json.dumps(large_source_config), encoding="utf-8")
+    assert bot._adblock_sync_timeout() == 1520
+    Path(bot.ADBLOCK_SOURCES).write_bytes(valid_sources)
+
     Path(bot.WLOC_PRESETS).write_text(json.dumps({"presets": [
         {"id": "p001", "name": "香港西九龙站", "latitude": 22.303611,
          "longitude": 114.165, "accuracy": 25},
