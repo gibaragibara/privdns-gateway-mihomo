@@ -70,5 +70,7 @@ assert "_mitm_set_service(_mitm_active())" in bot
 assert "_mitm_set_service(_wloc_active())" in bot or "_mitm_set_service(_mitm_active())" in bot
 assert "refresh_adblock" in scheduled, "daily timer must refresh REJECT and MITM adblock sources"
 assert "adblock_sources" in bot and "adblock_add_source" in bot and "adsrc_del:" in bot
+assert "adblock_domain_sources" in bot and "adblock_add_domain_source" in bot
+assert "adrej_del:" in bot and "--check-domain-url" in bot
 
 print("wloc-lifecycle regression OK")

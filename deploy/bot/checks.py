@@ -260,7 +260,7 @@ def check_adblock():
     domain_rules = int(stats.get("domain_rule_count", 0) or 0)
     domain_mrs_rules = int(stats.get("domain_mrs_rule_count", 0) or 0)
     domain_classical_rules = int(stats.get("domain_classical_rule_count", 0) or 0)
-    if not domain_rules or domain_rules != domain_mrs_rules + domain_classical_rules:
+    if domain_rules != domain_mrs_rules + domain_classical_rules:
         problems.append("普通 REJECT provider 统计无效")
     if domain_mrs_rules and not os.path.exists(ADBLOCK_DOMAIN_PROVIDER):
         problems.append("普通 REJECT provider 缺失")

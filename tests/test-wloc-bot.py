@@ -64,6 +64,7 @@ with tempfile.TemporaryDirectory() as td:
         "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
     }), encoding="utf-8")
     assert len(bot._adblock_module_sources()) == 2
+    assert len(bot._adblock_domain_sources()) == 1
     bot._adblock_check_plugin = lambda _url: (True, {
         "supported_rewrites": 2, "unported_scripts": 1,
     })
@@ -72,6 +73,18 @@ with tempfile.TemporaryDirectory() as td:
     custom_id = bot._adblock_source_id("https://example.com/custom.lpx")
     ok, _ = bot.delete_adblock_plugin(custom_id)
     assert ok and len(bot._adblock_module_sources()) == 2
+    bot._adblock_check_domain_source = lambda _url: (True, {
+        "supported_rules": 4, "domain_mrs_rule_count": 3,
+        "domain_classical_rule_count": 1,
+    })
+    domain_url = "https://example.com/custom-rules.yaml"
+    ok, _ = bot.add_adblock_domain_source(domain_url)
+    assert ok and len(bot._adblock_domain_sources()) == 2
+    assert bot._adblock_source_config()["domain_sources"][-1]["format"] == "auto"
+    ok, _ = bot.add_adblock_domain_source(domain_url)
+    assert not ok
+    ok, _ = bot.delete_adblock_domain_source(bot._adblock_source_id(domain_url))
+    assert ok and len(bot._adblock_domain_sources()) == 1
     Path(bot.WLOC_PRESETS).write_text(json.dumps({"presets": [
         {"id": "p001", "name": "香港西九龙站", "latitude": 22.303611,
          "longitude": 114.165, "accuracy": 25},
@@ -253,6 +266,12 @@ with tempfile.TemporaryDirectory() as td:
                for row in edits[-1][1]["inline_keyboard"] for button in row) == 2
     bot.handle_cb(7, 9, "adsrc_add")
     assert bot.state[7] == "adblock_add_source"
+    bot.handle_cb(7, 9, "adblock_domain_sources")
+    assert "普通 REJECT 规则源" in edits[-1][0]
+    assert sum(button.get("callback_data", "").startswith("adrej_del:")
+               for row in edits[-1][1]["inline_keyboard"] for button in row) == 1
+    bot.handle_cb(7, 9, "adrej_add")
+    assert bot.state[7] == "adblock_add_domain_source"
     bot.handle_cb(7, 9, "adblock")
     assert 7 not in bot.state
 

@@ -327,6 +327,25 @@ def _adblock_module_sources(config=None):
                        "url": url})
     return result
 
+
+def _adblock_domain_sources(config=None):
+    config = config or _adblock_source_config()
+    result = []
+    for item in config.get("domain_sources", []):
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        result.append({
+            "id": _adblock_source_id(url),
+            "name": str(item.get("name") or url)[:80],
+            "url": url,
+            "format": str(item.get("format") or "auto"),
+        })
+    return result
+
+
 def _adblock_plugin_url(url):
     url = str(url or "").strip()
     parsed = urllib.parse.urlsplit(url)
@@ -335,11 +354,27 @@ def _adblock_plugin_url(url):
         raise ValueError("只接受不含账号、片段的 HTTPS 插件 URL")
     return url
 
+
+def _adblock_domain_url(url):
+    try:
+        return _adblock_plugin_url(url)
+    except ValueError as exc:
+        raise ValueError("只接受不含账号、片段的 HTTPS 规则源 URL") from exc
+
+
 def _adblock_plugin_name(url):
     parsed = urllib.parse.urlsplit(url)
     name = urllib.parse.unquote(os.path.basename(parsed.path)).rsplit(".", 1)[0]
     name = " ".join(name.replace("_", " ").replace("-", " ").split())
     return (name or parsed.hostname or "自定义插件")[:48]
+
+
+def _adblock_domain_name(url):
+    parsed = urllib.parse.urlsplit(url)
+    name = urllib.parse.unquote(os.path.basename(parsed.path)).rsplit(".", 1)[0]
+    name = " ".join(name.replace("_", " ").replace("-", " ").split())
+    return (name or parsed.hostname or "自定义规则源")[:48]
+
 
 def _adblock_check_plugin(url):
     result = sh(["python3", ADBLOCK_SYNC, "--check-module-url", url])
@@ -349,6 +384,16 @@ def _adblock_check_plugin(url):
         return True, json.loads(result.stdout)
     except (TypeError, json.JSONDecodeError):
         return False, "插件校验器返回了无效结果"
+
+
+def _adblock_check_domain_source(url):
+    result = sh(["python3", ADBLOCK_SYNC, "--check-domain-url", url])
+    if result.returncode != 0:
+        return False, "规则源校验失败: " + (result.stdout + result.stderr)[-300:]
+    try:
+        return True, json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return False, "规则源校验器返回了无效结果"
 
 def _mitm_active():
     return _wloc_active() or (_adblock_active() and bool(_adblock_hosts()))
@@ -461,7 +506,10 @@ def _adblock_page():
             "自动更新: 每日 04:30（含普通 REJECT 与 MITM 插件）\n\n"
             "MITM 只执行 reject、mock、JSON 路径修改及受限 jq；不会执行远程 JavaScript。")
     rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
-    rows.append([{"text": "🧩 MITM 插件管理", "callback_data": "adblock_sources"}])
+    rows.append([
+        {"text": "📚 REJECT 规则源", "callback_data": "adblock_domain_sources"},
+        {"text": "🧩 MITM 插件", "callback_data": "adblock_sources"},
+    ])
     if enabled:
         rows.append([{"text": "🔄 同步规则", "callback_data": "adblock_refresh"}])
         rows.append([{"text": "♻️ 关闭去广告", "callback_data": "adblock_off"}])
@@ -480,6 +528,24 @@ def _adblock_sources_page():
     for source in sources[:64]:
         label = " ".join(source["name"].split())[:42] or source["url"][:42]
         rows.append([{"text": "🗑 " + label, "callback_data": "adsrc_del:" + source["id"]}])
+    rows.extend([[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+    return text, {"inline_keyboard": rows}
+
+
+def _adblock_domain_sources_page():
+    sources = _adblock_domain_sources()
+    text = ("📚 <b>普通 REJECT 规则源</b>\n"
+            f"当前: <b>{len(sources)}</b> 个。支持 Surge/Clash list、纯域名列表及 "
+            "Clash payload YAML/JSON；服务器自动识别并转换为 MRS。\n"
+            "URL 是唯一标识，删除后每日更新不会恢复。")
+    rows = [[{"text": "➕ 添加规则源 URL", "callback_data": "adrej_add"}]]
+    for source in sources[:64]:
+        host = urllib.parse.urlsplit(source["url"]).hostname or ""
+        label = (" ".join(source["name"].split())[:28] +
+                 ((" · " + host[:18]) if host else ""))
+        rows.append([{"text": "🗑 " + (label or source["url"][:42]),
+                      "callback_data": "adrej_del:" + source["id"]}])
     rows.extend([[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
@@ -999,9 +1065,8 @@ def _adblock_sync_rules():
     domain_rule_count = int(stats.get("domain_rule_count", 0) or 0)
     domain_mrs_rule_count = int(stats.get("domain_mrs_rule_count", 0) or 0)
     domain_classical_rule_count = int(stats.get("domain_classical_rule_count", 0) or 0)
-    if (not domain_rule_count
-            or domain_rule_count != domain_mrs_rule_count + domain_classical_rule_count):
-        return False, "规则同步完成但没有可用的普通 REJECT 规则"
+    if domain_rule_count != domain_mrs_rule_count + domain_classical_rule_count:
+        return False, "普通 REJECT 规则统计不一致"
     if domain_mrs_rule_count and not os.path.exists(ADBLOCK_DOMAIN_PROVIDER_FILE):
         return False, "普通 REJECT MRS 规则缺失"
     if domain_classical_rule_count and not os.path.exists(ADBLOCK_CLASSICAL_PROVIDER_FILE):
@@ -1228,6 +1293,64 @@ def delete_adblock_plugin(source_id):
                 _adblock_write_source_config(previous)
                 return False, message
         return True, "✅ 已删除插件 " + str(removed.get("name") or removed.get("url") or "")
+
+
+def add_adblock_domain_source(url):
+    try:
+        url = _adblock_domain_url(url)
+    except ValueError as exc:
+        return False, str(exc)
+    ok, detail = _adblock_check_domain_source(url)
+    if not ok:
+        return False, detail
+    with _mitm_config_lock():
+        config = _adblock_source_config()
+        if any(str(item.get("url") or "").strip() == url
+               for item in config.get("domain_sources", []) if isinstance(item, dict)):
+            return False, "这个规则源 URL 已存在"
+        if len(_adblock_domain_sources(config)) >= 64:
+            return False, "普通 REJECT 规则源最多 64 个"
+        previous = json.loads(json.dumps(config))
+        config["domain_sources"].append({
+            "name": _adblock_domain_name(url), "url": url,
+            "format": "auto", "enabled": True,
+        })
+        _adblock_write_source_config(config)
+        active = _adblock_active()
+        if active:
+            refreshed, message = enable_adblock()
+            if not refreshed:
+                _adblock_write_source_config(previous)
+                return False, message
+        status = "已重新编译并应用" if active else "将在下次启用或定时更新时编译"
+        return True, (f"✅ 已添加规则源 {_adblock_domain_name(url)}；"
+                      f"识别 {detail.get('supported_rules', 0)} 条，"
+                      f"MRS {detail.get('domain_mrs_rule_count', 0)} 条，"
+                      f"兼容规则 {detail.get('domain_classical_rule_count', 0)} 条；{status}")
+
+
+def delete_adblock_domain_source(source_id):
+    with _mitm_config_lock():
+        config = _adblock_source_config()
+        previous = json.loads(json.dumps(config))
+        removed = None
+        kept = []
+        for item in config.get("domain_sources", []):
+            url = str(item.get("url") or "") if isinstance(item, dict) else ""
+            if removed is None and _adblock_source_id(url) == source_id:
+                removed = item
+            else:
+                kept.append(item)
+        if removed is None:
+            return False, "规则源不存在或已删除"
+        config["domain_sources"] = kept
+        _adblock_write_source_config(config)
+        if _adblock_active():
+            refreshed, message = enable_adblock()
+            if not refreshed:
+                _adblock_write_source_config(previous)
+                return False, message
+        return True, "✅ 已按 URL 删除规则源 " + str(removed.get("url") or "")
 
 # 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
@@ -2699,10 +2822,19 @@ def handle_cb(chat, mid, data, cb_id=None):
     if data == "adblock_sources":
         state.pop(chat, None)
         title, kb = _adblock_sources_page(); edit(chat, mid, title, kb); return
+    if data == "adblock_domain_sources":
+        state.pop(chat, None)
+        title, kb = _adblock_domain_sources_page(); edit(chat, mid, title, kb); return
     if data == "adsrc_add":
         state[chat] = "adblock_add_source"
         edit(chat, mid, "发送一个 HTTPS Kelee/Loon/Egern 插件 URL。\n"
              "添加前会校验声明式规则；远程 JavaScript 和 ProtoBuf 不会执行。/cancel 取消。",
+             ADBLOCK_BACK); return
+    if data == "adrej_add":
+        state[chat] = "adblock_add_domain_source"
+        edit(chat, mid, "发送一个 HTTPS 普通 REJECT 规则源 URL。\n"
+             "支持 Surge/Clash .list、纯域名/domain-set、Clash payload YAML/JSON；"
+             "添加前会自动识别并校验。二进制 .mrs/.srs 不导入。/cancel 取消。",
              ADBLOCK_BACK); return
     if data.startswith("adsrc_del:"):
         source_id = data.split(":", 1)[1]
@@ -2724,6 +2856,27 @@ def handle_cb(chat, mid, data, cb_id=None):
             title, kb = _adblock_sources_page()
             edit(chat, mid, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
         run_bg(_adsrc_delete); return
+    if data.startswith("adrej_del:"):
+        source_id = data.split(":", 1)[1]
+        source = next((item for item in _adblock_domain_sources()
+                       if item["id"] == source_id), None)
+        if not source:
+            title, kb = _adblock_domain_sources_page()
+            edit(chat, mid, "规则源不存在或已删除。\n\n" + title, kb); return
+        edit(chat, mid, f"确认删除普通 REJECT 规则源 <b>{_esc(source['name'])}</b>？\n"
+             f"URL: <code>{_esc(source['url'])}</code>\n"
+             "若去广告已开启，会立即重新编译并应用剩余来源。",
+             {"inline_keyboard": [
+                 [{"text": "确认按 URL 删除", "callback_data": "adrej_del_yes:" + source_id}],
+                 [{"text": "取消", "callback_data": "adblock_domain_sources"}]]}); return
+    if data.startswith("adrej_del_yes:"):
+        source_id = data.split(":", 1)[1]
+        edit(chat, mid, "正在删除规则源并重新生成 MRS…", ADBLOCK_BACK)
+        def _adrej_delete(sid=source_id):
+            ok, msg = delete_adblock_domain_source(sid)
+            title, kb = _adblock_domain_sources_page()
+            edit(chat, mid, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
+        run_bg(_adrej_delete); return
     if data in ("adblock_on", "adblock_refresh"):
         edit(chat, mid, "正在下载并编译普通 REJECT 与 MITM 规则…", ADBLOCK_BACK)
         def _adon():
@@ -3122,6 +3275,13 @@ def handle_text(chat, text, msg_id=None):
             title, kb = _adblock_sources_page()
             send(chat, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
         run_bg(_add_adblock_source); return
+    if act == "adblock_add_domain_source":
+        send_plain(chat, "正在下载、识别并添加普通 REJECT 规则源…")
+        def _add_adblock_domain(url=text):
+            ok, msg = add_adblock_domain_source(url)
+            title, kb = _adblock_domain_sources_page()
+            send(chat, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
+        run_bg(_add_adblock_domain); return
     if act == "add_exit":
         # 对齐 5GPN-X: 立刻删含密码消息 + 后台解析写入, 主循环不堵
         link = text

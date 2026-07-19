@@ -96,6 +96,56 @@ assert parsed_classical["rules"] == [
 ]
 assert parsed_classical["stats"]["unsupported_lines"] == 1
 
+auto_list = """
+# mixed plain list
+.suffix.auto.example
+exact.auto.example
+commented.auto.example # inline comment
+DOMAIN-SUFFIX,tracker.auto.example
+DOMAIN-KEYWORD,ad-token
+*.wild.auto.example
+||unsupported.example^
+"""
+parsed_auto = sync.parse_domain_source(
+    auto_list, "auto-list", "https://example.com/auto.list", "auto")
+assert parsed_auto["rules"] == [
+    "DOMAIN-SUFFIX,suffix.auto.example",
+    "DOMAIN,exact.auto.example",
+    "DOMAIN,commented.auto.example",
+    "DOMAIN-SUFFIX,tracker.auto.example",
+    "DOMAIN-KEYWORD,ad-token",
+    "DOMAIN-WILDCARD,*.wild.auto.example",
+]
+assert parsed_auto["stats"]["unsupported_lines"] == 1
+
+yaml_provider = """
+name: synthetic
+payload:
+  - 'DOMAIN-SUFFIX,yaml-classical.example'
+  - ".yaml-domain.example" # quoted domain behavior
+  - plain-yaml.example # unquoted domain behavior
+  - '*.wild-yaml.example'
+  - {bad: mapping}
+interval: 86400
+"""
+parsed_yaml = sync.parse_domain_source(
+    yaml_provider, "auto-yaml", "https://example.com/rules.yaml", "auto")
+assert parsed_yaml["rules"] == [
+    "DOMAIN-SUFFIX,yaml-classical.example",
+    "DOMAIN-SUFFIX,yaml-domain.example",
+    "DOMAIN,plain-yaml.example",
+    "DOMAIN-WILDCARD,*.wild-yaml.example",
+]
+assert parsed_yaml["stats"]["unsupported_lines"] == 1
+
+json_provider = json.dumps({"payload": ["+.json.example", "json-exact.example", 7]})
+parsed_json_provider = sync.parse_domain_source(
+    json_provider, "auto-json", "https://example.com/rules.json", "auto")
+assert parsed_json_provider["rules"] == [
+    "DOMAIN-SUFFIX,json.example", "DOMAIN,json-exact.example",
+]
+assert parsed_json_provider["stats"]["unsupported_lines"] == 1
+
 domain_config = {"domain_sources": [
     {"name": "one", "url": "https://example.com/one", "format": "domain-set"},
     {"name": "two", "url": "https://example.com/two", "format": "classical"},
@@ -116,6 +166,12 @@ assert domain_rules == [
 assert classical_rules == [
     "DOMAIN-KEYWORD,-ad.example", "IP-CIDR,192.0.2.0/24,no-resolve",
 ]
+auto_domains, auto_classical = sync.split_domain_rules(parsed_auto["rules"])
+assert auto_domains == [
+    ".suffix.auto.example", "exact.auto.example", "commented.auto.example",
+    ".tracker.auto.example", "*.wild.auto.example",
+]
+assert auto_classical == ["DOMAIN-KEYWORD,ad-token"]
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)

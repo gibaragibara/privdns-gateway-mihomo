@@ -37,7 +37,10 @@ HOST_RE = re.compile(
 DOMAIN_TOKEN_RE = re.compile(
     r"^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_.-]{0,251}[a-z0-9_])?$"
 )
-CLASSICAL_TYPES = {"DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "IP-CIDR6"}
+CLASSICAL_TYPES = {
+    "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-WILDCARD", "DOMAIN-KEYWORD",
+    "IP-CIDR", "IP-CIDR6",
+}
 
 
 class CompileError(ValueError):
@@ -292,6 +295,18 @@ def _domain_token(value):
     return value
 
 
+def _domain_pattern(value):
+    value = str(value).strip().lower().rstrip(".")
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise CompileError("wildcard domains must be ASCII") from exc
+    if (not re.fullmatch(r"(?=.{1,253}$)[a-z0-9_*?](?:[a-z0-9_.*?-]{0,251}[a-z0-9_*?])?", value)
+            or ".." in value or not any(char in value for char in "*?")):
+        raise CompileError("invalid wildcard domain")
+    return value
+
+
 def _classical_rule(line):
     fields = [field.strip() for field in str(line).split(",")]
     if len(fields) < 2 or fields[0].upper() not in CLASSICAL_TYPES:
@@ -300,6 +315,8 @@ def _classical_rule(line):
     value = fields[1]
     if kind in {"DOMAIN", "DOMAIN-SUFFIX"}:
         value = _domain_token(value.lstrip("+."))
+    elif kind == "DOMAIN-WILDCARD":
+        value = _domain_pattern(value)
     elif kind == "DOMAIN-KEYWORD":
         value = value.lower()
         if not value or len(value) > 253 or any(ord(char) < 32 for char in value) or "," in value:
@@ -317,18 +334,97 @@ def _classical_rule(line):
     return f"{kind},{value}{suffix}"
 
 
+def _yaml_scalar(value):
+    value = str(value).strip()
+    single = re.fullmatch(r"'((?:[^']|'')*)'\s*(?:#.*)?", value)
+    if single:
+        return single.group(1).replace("''", "'")
+    if value.startswith('"'):
+        try:
+            decoded, end = json.JSONDecoder().raw_decode(value)
+        except json.JSONDecodeError as exc:
+            raise CompileError("invalid quoted YAML scalar") from exc
+        tail = value[end:].strip()
+        if not isinstance(decoded, str) or (tail and not tail.startswith("#")):
+            raise CompileError("invalid quoted YAML scalar")
+        return decoded
+    value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
+    if not value or value[0] in "&!|>{[":
+        raise CompileError("unsupported YAML scalar")
+    return value
+
+
+def _auto_source_entries(text):
+    text = str(text)
+    stripped = text.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            payload = payload.get("payload")
+        if isinstance(payload, list):
+            entries = [item for item in payload if isinstance(item, str)]
+            return entries, len(payload) - len(entries)
+
+    lines = text.splitlines()
+    payload_index = None
+    payload_indent = 0
+    for index, raw in enumerate(lines):
+        if re.fullmatch(r"\s*payload\s*:\s*(?:#.*)?", raw):
+            payload_index = index
+            payload_indent = len(raw) - len(raw.lstrip())
+            break
+    if payload_index is None:
+        return lines, 0
+
+    entries = []
+    unsupported = 0
+    for raw in lines[payload_index + 1:]:
+        stripped_line = raw.strip()
+        if not stripped_line or stripped_line.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if not stripped_line.startswith("-"):
+            if indent <= payload_indent:
+                break
+            unsupported += 1
+            continue
+        try:
+            entries.append(_yaml_scalar(stripped_line[1:].strip()))
+        except CompileError:
+            unsupported += 1
+    return entries, unsupported
+
+
+def _auto_domain_rule(line):
+    line = re.split(r"\s+#", str(line), maxsplit=1)[0].strip()
+    kind = str(line).split(",", 1)[0].strip().upper()
+    if kind in CLASSICAL_TYPES:
+        return _classical_rule(line)
+    suffix = line.startswith((".", "+."))
+    value = line[2:] if line.startswith("+.") else line.lstrip(".")
+    if any(char in value for char in "*?"):
+        return "DOMAIN-WILDCARD," + _domain_pattern(value)
+    return f"{'DOMAIN-SUFFIX' if suffix else 'DOMAIN'},{_domain_token(value)}"
+
+
 def parse_domain_source(text, name, source_url="", source_format="classical"):
     source_format = str(source_format).strip().lower()
-    if source_format not in {"classical", "domain-set"}:
+    if source_format not in {"auto", "classical", "domain-set"}:
         raise CompileError(f"unsupported domain source format {source_format}")
     rules = []
-    unsupported = 0
-    for raw in str(text).splitlines():
+    entries, unsupported = (_auto_source_entries(text) if source_format == "auto"
+                            else (str(text).splitlines(), 0))
+    for raw in entries:
         line = raw.strip()
         if not line or line.startswith(("#", ";", "!", "//")):
             continue
         try:
-            if source_format == "domain-set":
+            if source_format == "auto":
+                rule = _auto_domain_rule(line)
+            elif source_format == "domain-set":
                 suffix = line.startswith((".", "+."))
                 value = _domain_token(line[2:] if line.startswith("+.") else line.lstrip("."))
                 rule = f"{'DOMAIN-SUFFIX' if suffix else 'DOMAIN'},{value}"
@@ -364,7 +460,7 @@ def compile_domain_sources(config, fetcher=fetch_domain_text):
         url = str(item.get("url") or "")
         try:
             source = parse_domain_source(
-                fetcher(url), name, url, item.get("format", "classical"))
+                fetcher(url), name, url, item.get("format", "auto"))
         except Exception as exc:
             failures.append({"name": name, "error": str(exc)[:200]})
             continue
@@ -401,6 +497,8 @@ def split_domain_rules(rules):
             converted = value
         elif kind == "DOMAIN-SUFFIX":
             converted = "." + value
+        elif kind == "DOMAIN-WILDCARD":
+            converted = value
         else:
             if rule not in seen_classical:
                 seen_classical.add(rule)
@@ -525,6 +623,7 @@ def main():
     parser.add_argument("--merge-defaults")
     parser.add_argument("--merge-only", action="store_true")
     parser.add_argument("--check-module-url")
+    parser.add_argument("--check-domain-url")
     args = parser.parse_args()
     if args.check_module_url:
         parsed = urllib.parse.urlsplit(args.check_module_url)
@@ -533,6 +632,19 @@ def main():
         if not module["rules"] and not module["hosts"] and not module["stats"]["unported_scripts"]:
             raise SystemExit("URL does not contain a recognized Loon/Egern module")
         print(json.dumps(module["stats"], ensure_ascii=False, sort_keys=True))
+        return
+    if args.check_domain_url:
+        parsed = urllib.parse.urlsplit(args.check_domain_url)
+        name = os.path.basename(parsed.path).rsplit(".", 1)[0] or parsed.hostname or "custom"
+        source = parse_domain_source(
+            fetch_domain_text(args.check_domain_url), name, args.check_domain_url, "auto")
+        domains, classical = split_domain_rules(source["rules"])
+        stats = dict(source["stats"])
+        stats.update({
+            "domain_mrs_rule_count": len(domains),
+            "domain_classical_rule_count": len(classical),
+        })
+        print(json.dumps(stats, ensure_ascii=False, sort_keys=True))
         return
     if args.merge_defaults:
         changed = merge_source_defaults(args.sources, args.merge_defaults)
