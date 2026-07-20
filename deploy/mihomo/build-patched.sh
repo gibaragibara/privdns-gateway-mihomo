@@ -9,6 +9,10 @@ ARCH=${1:-amd64}
 OUTPUT=${2:-"$PWD/mihomo-linux-${ARCH}-v${MIHOMO_VER}-${MIHOMO_PATCH_VER}"}
 PATCH="$ROOT/deploy/mihomo/patches/0001-force-parse-pure-ip-sniffing.patch"
 
+if [[ "$OUTPUT" != /* ]]; then
+  OUTPUT="$PWD/$OUTPUT"
+fi
+
 case "$ARCH" in
   amd64) arch_env=(GOARCH=amd64 GOAMD64=v1) ;;
   arm64) arch_env=(GOARCH=arm64) ;;
