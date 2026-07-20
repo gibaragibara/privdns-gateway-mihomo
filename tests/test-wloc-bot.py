@@ -73,6 +73,8 @@ with tempfile.TemporaryDirectory() as td:
         ],
         "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
         "local_domain_rules": ["ads.private.example"],
+        "script_conversions": [{"script_url": "https://example.com/a.js"}],
+        "external_jq_pins": [{"url": "https://example.com/a.jq"}],
         "mitm_exclude_hosts": ["api.example.com"],
         "compatibility_routes": [
             {"type": "domain", "value": "api.example.com", "outbound": "residential"},
@@ -148,6 +150,10 @@ with tempfile.TemporaryDirectory() as td:
     assert ok and len(bot._adblock_domain_sources()) == 1
     preserved_config = bot._adblock_source_config()
     assert preserved_config["local_domain_rules"] == ["ads.private.example"]
+    assert preserved_config["script_conversions"] == [
+        {"script_url": "https://example.com/a.js"}]
+    assert preserved_config["external_jq_pins"] == [
+        {"url": "https://example.com/a.jq"}]
     assert preserved_config["mitm_exclude_hosts"] == ["api.example.com"]
     assert len(preserved_config["compatibility_routes"]) == 2
 
@@ -169,7 +175,7 @@ with tempfile.TemporaryDirectory() as td:
     bot.sh = original_sh
     Path(bot.ADBLOCK_SOURCES).write_bytes(valid_sources)
 
-    assert bot._adblock_sync_timeout() == 320
+    assert bot._adblock_sync_timeout() == 350
     large_source_config = {
         "sources": [{"url": f"https://example.com/module-{index}.lpx"}
                     for index in range(bot.ADBLOCK_SOURCE_LIMIT)],

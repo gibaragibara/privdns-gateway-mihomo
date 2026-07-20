@@ -23,10 +23,16 @@ MAX_BODY_BYTES = 4 * 1024 * 1024
 JQ_TIMEOUT = 1.0
 REQUEST_ACTIONS = {
     "reject", "reject-200", "reject-dict", "reject-img", "mock-response-body",
+    "request-header-mock",
 }
 JSON_ACTIONS = {
     "response-body-json-del", "response-body-json-jq", "response-body-json-replace",
 }
+BODY_ACTIONS = {
+    "response-body-replace-regex", "response-body-text-replace",
+    "response-body-html-remove", "response-body-html-json-jq",
+}
+RESPONSE_CONTROL_ACTIONS = {"response-request-header-mock"}
 TRANSPARENT_GIF = base64.b64decode("R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=")
 LOG = logging.getLogger("pdg-adblock")
 
@@ -34,9 +40,10 @@ LOG = logging.getLogger("pdg-adblock")
 def _log(level, message, *args):
     rendered = message % args if args else message
     if MITM_CTX is not None:
-        method = getattr(MITM_CTX.log, level, None)
+        mitm_log = getattr(MITM_CTX, "log", None)
+        method = getattr(mitm_log, level, None)
         if method is None and level == "warning":
-            method = getattr(MITM_CTX.log, "warn", None)
+            method = getattr(mitm_log, "warn", None)
         if callable(method):
             method(rendered)
             return
@@ -150,6 +157,86 @@ def _replace_response_body(response, body):
             response.headers.pop(key, None)
 
 
+def _header_value(headers, name):
+    name = str(name).lower()
+    for key, value in getattr(headers, "items", lambda: ())():
+        if str(key).lower() == name:
+            return str(value)
+    return ""
+
+
+def _request_header_matches(flow, arguments):
+    headers = getattr(flow.request, "headers", {})
+    matches = []
+    for condition in arguments.get("headers", []):
+        value = _header_value(headers, condition.get("name", ""))
+        matches.append(bool(re.search(str(condition.get("pattern", "")), value)))
+    return (all(matches) if arguments.get("mode") == "all" else any(matches)) \
+        if matches else False
+
+
+def replace_text_pairs(text, pairs):
+    changed = 0
+    for before, after in pairs:
+        count = text.count(before)
+        if count:
+            text = text.replace(before, after)
+            changed += count
+    return text, changed
+
+
+def remove_html_elements(text, tag, markers):
+    token_re = re.compile(rf"</?{re.escape(tag)}\b[^>]*>", re.IGNORECASE)
+    removed = 0
+    for marker in markers:
+        search_from = 0
+        while True:
+            marker_at = text.find(marker, search_from)
+            if marker_at < 0:
+                break
+            opening_at = text.lower().rfind("<" + tag.lower(), 0, marker_at + 1)
+            opening = token_re.match(text, opening_at) if opening_at >= 0 else None
+            if opening is None or opening.group(0).lstrip().startswith("</"):
+                search_from = marker_at + len(marker)
+                continue
+            depth = 0
+            end = None
+            for token in token_re.finditer(text, opening.start()):
+                if token.group(0).lstrip().startswith("</"):
+                    depth -= 1
+                    if depth == 0:
+                        end = token.end()
+                        break
+                elif not token.group(0).rstrip().endswith("/>"):
+                    depth += 1
+            if end is None:
+                search_from = marker_at + len(marker)
+                continue
+            text = text[:opening.start()] + text[end:]
+            search_from = opening.start()
+            removed += 1
+    return text, removed
+
+
+def rewrite_embedded_json(text, element_id, program):
+    pattern = re.compile(
+        r"(<script\b(?=[^>]*\bid\s*=\s*(['\"])" + re.escape(element_id)
+        + r"\2)[^>]*>)(.*?)(</script\s*>)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    changed = 0
+
+    def replace(match):
+        nonlocal changed
+        value = json.loads(match.group(3))
+        value = run_jq(value, program)
+        changed += 1
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return match.group(1) + encoded + match.group(4)
+
+    return pattern.sub(replace, text), changed
+
+
 class RuleCache:
     def __init__(self, path=RULES_PATH):
         self.path = path
@@ -187,7 +274,8 @@ class RuleCache:
                 for raw in payload.get("rules", []):
                     if not isinstance(raw, dict) or raw.get("action") not in (
                             REQUEST_ACTIONS | JSON_ACTIONS |
-                            {"response-body-replace-regex", "response-header-add"}):
+                            BODY_ACTIONS | RESPONSE_CONTROL_ACTIONS |
+                            {"response-header-add"}):
                         continue
                     try:
                         compiled = re.compile(str(raw["pattern"]))
@@ -244,9 +332,20 @@ class AdblockAddon:
         return str(getattr(flow.request, "pretty_url", "") or
                    getattr(flow.request, "url", ""))
 
-    def _synthetic(self, rule):
+    def _synthetic(self, rule, flow=None):
         action = rule["action"]
         arguments = rule.get("arguments", {})
+        if action == "request-header-mock":
+            if flow is None or not _request_header_matches(flow, arguments):
+                return None
+            body = str(arguments.get("body", "")).encode()
+            content_type = {
+                "json": "application/json", "html": "text/html; charset=utf-8",
+                "text": "text/plain; charset=utf-8",
+            }.get(str(arguments.get("content_type", "text")), "application/octet-stream")
+            return int(arguments.get("status", 200)), body, {
+                "content-type": content_type, "cache-control": "no-store",
+            }
         if action == "reject":
             return 204, b"", {"cache-control": "no-store"}
         if action == "reject-200":
@@ -278,7 +377,7 @@ class AdblockAddon:
         for rule in self.rules.request_candidates(host):
             if not rule["compiled"].search(url):
                 continue
-            synthetic = self._synthetic(rule)
+            synthetic = self._synthetic(rule, flow)
             if synthetic is None:
                 continue
             flow.response = self.response_factory(*synthetic)
@@ -302,6 +401,7 @@ class AdblockAddon:
             return
         json_value = None
         json_loaded = False
+        json_dirty = False
         changed = False
         body_changed = False
         for rule in matches:
@@ -314,26 +414,46 @@ class AdblockAddon:
                         flow.response.headers[str(values[index])] = str(values[index + 1])
                     changed = True
                     continue
+                if action == "response-request-header-mock":
+                    if not _request_header_matches(flow, arguments):
+                        continue
+                    json_loaded = False
+                    json_dirty = False
+                    body = str(arguments.get("body", "")).encode()
+                    flow.response.status_code = int(arguments.get("status", 200))
+                    flow.response.headers["content-type"] = {
+                        "json": "application/json", "html": "text/html; charset=utf-8",
+                        "text": "text/plain; charset=utf-8",
+                    }.get(str(arguments.get("content_type", "text")),
+                          "application/octet-stream")
+                    changed = True
+                    body_changed = True
+                    continue
                 if action in JSON_ACTIONS:
                     if not json_loaded:
                         json_value = json.loads(body.decode("utf-8"))
                         json_loaded = True
                     if action == "response-body-json-del":
-                        changed = any(json_delete(json_value, path)
-                                      for path in arguments.get("values", [])) or changed
+                        rule_changed = False
+                        for path in arguments.get("values", []):
+                            rule_changed = json_delete(json_value, path) or rule_changed
                     elif action == "response-body-json-replace":
-                        changed = any(json_set(json_value, path, value)
-                                      for path, value in arguments.get("pairs", [])) or changed
+                        rule_changed = False
+                        for path, value in arguments.get("pairs", []):
+                            rule_changed = json_set(json_value, path, value) or rule_changed
                     else:
                         json_value = run_jq(json_value, arguments["program"])
-                        changed = True
-                        body_changed = True
+                        rule_changed = True
+                    changed = rule_changed or changed
+                    json_dirty = rule_changed or json_dirty
                     continue
-                if json_loaded and changed:
-                    body = json.dumps(json_value, ensure_ascii=False,
-                                      separators=(",", ":")).encode()
-                    body_changed = True
+                if json_loaded:
+                    if json_dirty:
+                        body = json.dumps(json_value, ensure_ascii=False,
+                                          separators=(",", ":")).encode()
+                        body_changed = True
                     json_loaded = False
+                    json_dirty = False
                 if action == "response-body-replace-regex":
                     text = body.decode("utf-8")
                     replaced, count = re.subn(arguments["pattern"],
@@ -342,15 +462,38 @@ class AdblockAddon:
                         body = replaced.encode()
                         changed = True
                         body_changed = True
+                elif action == "response-body-text-replace":
+                    text, count = replace_text_pairs(
+                        body.decode("utf-8"), arguments.get("pairs", []))
+                    if count:
+                        body = text.encode()
+                        changed = True
+                        body_changed = True
+                elif action == "response-body-html-remove":
+                    text, count = remove_html_elements(
+                        body.decode("utf-8"), arguments.get("tag", "div"),
+                        arguments.get("markers", []))
+                    if count:
+                        body = text.encode()
+                        changed = True
+                        body_changed = True
+                elif action == "response-body-html-json-jq":
+                    text, count = rewrite_embedded_json(
+                        body.decode("utf-8"), arguments["element_id"],
+                        arguments["program"])
+                    if count:
+                        body = text.encode()
+                        changed = True
+                        body_changed = True
             except (KeyError, TypeError, ValueError, UnicodeError, re.error,
                     subprocess.SubprocessError, RuntimeError, json.JSONDecodeError) as exc:
                 _log("warning", "adblock rule skipped source=%s action=%s error=%s",
                      rule.get("source", "?"), action, exc)
-        if json_loaded and changed:
+        if json_loaded and json_dirty:
             body = json.dumps(json_value, ensure_ascii=False, separators=(",", ":")).encode()
         if not changed:
             return
-        if json_loaded:
+        if json_loaded and json_dirty:
             body_changed = True
         if body_changed:
             _replace_response_body(flow.response, body)

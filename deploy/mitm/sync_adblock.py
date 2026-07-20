@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -33,6 +34,10 @@ MAX_DOMAIN_RULES_PER_SOURCE = 400_000
 MAX_DOMAIN_RULES_TOTAL = 600_000
 MAX_LOCAL_DOMAIN_RULES = 4096
 MAX_DOMAIN_LINE_CHARS = 4096
+MAX_PINNED_RESOURCES = 128
+MAX_SCRIPT_CONVERSION_ENTRIES = 512
+MAX_SCRIPT_CONVERSION_RULES = 1024
+MAX_JQ_PROGRAM_CHARS = 32_768
 SOURCE_FETCH_WORKERS = 4
 SUPPORTED_ACTIONS = {
     "reject", "reject-200", "reject-dict", "reject-img",
@@ -40,6 +45,18 @@ SUPPORTED_ACTIONS = {
     "response-body-json-jq", "response-body-json-replace",
     "response-body-replace-regex", "response-header-add",
 }
+CONVERSION_ACTIONS = SUPPORTED_ACTIONS | {
+    "request-header-mock", "response-body-text-replace",
+    "response-body-html-remove", "response-body-html-json-jq",
+    "response-request-header-mock",
+}
+REQUEST_ACTIONS = {
+    "reject", "reject-200", "reject-dict", "reject-img",
+    "mock-response-body", "request-header-mock",
+}
+BLOCKED_JQ_RE = re.compile(
+    r"(?:\$ENV\b|\b(?:debug|env|include|import|input|inputs|module)\b)"
+)
 HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
@@ -106,6 +123,22 @@ def _tokens(arguments):
         raise CompileError(f"invalid rewrite arguments: {exc}") from exc
 
 
+def _https_url(value, label="resource"):
+    value = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.fragment or len(value) > 2000):
+        raise CompileError(f"{label} must be an HTTPS URL without credentials or fragments")
+    return value
+
+
+def _validate_jq_program(program, max_chars=MAX_JQ_PROGRAM_CHARS):
+    program = str(program)
+    if not program or len(program) > max_chars or BLOCKED_JQ_RE.search(program):
+        raise CompileError("jq program uses a blocked capability or exceeds the size limit")
+    return program
+
+
 def _mock_arguments(arguments):
     status_match = re.search(r"(?:^|\s)status-code=(\d{3})(?:\s|$)", arguments)
     type_match = re.search(r"(?:^|\s)data-type=([A-Za-z0-9_-]+)(?:\s|$)", arguments)
@@ -155,10 +188,7 @@ def parse_action(action, arguments):
         values = _tokens(arguments)
         if len(values) != 1 or values[0].startswith("jq-path="):
             raise CompileError("external jq programs are not imported")
-        if len(values[0]) > 2000 or re.search(
-                r"(?:\$ENV\b|\b(?:debug|env|include|import|input|inputs|module)\b)", values[0]):
-            raise CompileError("jq program uses a blocked capability")
-        return {"program": values[0]}
+        return {"program": _validate_jq_program(values[0], 2000)}
     if action == "response-body-replace-regex":
         values = _tokens(arguments)
         if len(values) != 2:
@@ -166,6 +196,150 @@ def parse_action(action, arguments):
         re.compile(values[0])
         return {"pattern": values[0], "replacement": values[1]}
     raise CompileError(f"unsupported action {action}")
+
+
+def _string_list(value, label, limit=64, item_chars=4096):
+    if (not isinstance(value, list) or not value or len(value) > limit
+            or any(not isinstance(item, str) or not item or len(item) > item_chars
+                   for item in value)):
+        raise CompileError(f"{label} must be a non-empty string list")
+    return list(value)
+
+
+def _conversion_arguments(action, arguments):
+    if not isinstance(arguments, dict):
+        raise CompileError("script conversion arguments must be an object")
+    if action in {"reject", "reject-200", "reject-dict", "reject-img"}:
+        return {}
+    if action == "mock-response-body":
+        status = int(arguments.get("status", 200))
+        content_type = str(arguments.get("content_type", "text"))
+        body = str(arguments.get("body", ""))
+        encoded = bool(arguments.get("base64", False))
+        if not 100 <= status <= 599 or content_type not in {"text", "json", "html", "binary"}:
+            raise CompileError("mock response metadata is invalid")
+        if encoded:
+            try:
+                base64.b64decode(body, validate=True)
+            except ValueError as exc:
+                raise CompileError("mock response base64 body is invalid") from exc
+        elif len(body.encode()) > 65_536:
+            raise CompileError("mock response body is oversized")
+        return {"status": status, "content_type": content_type,
+                "body": body, "base64": encoded}
+    if action == "response-body-json-jq":
+        return {"program": _validate_jq_program(arguments.get("program", ""))}
+    if action == "response-body-json-del":
+        return {"values": _string_list(arguments.get("values"), "JSON delete paths")}
+    if action == "response-body-json-replace":
+        pairs = arguments.get("pairs")
+        if (not isinstance(pairs, list) or not pairs or len(pairs) > 64
+                or any(not isinstance(pair, list) or len(pair) != 2
+                       or not isinstance(pair[0], str) or not pair[0]
+                       for pair in pairs)):
+            raise CompileError("JSON replacement pairs are invalid")
+        return {"pairs": pairs}
+    if action == "response-header-add":
+        values = _string_list(arguments.get("values"), "response headers", limit=32)
+        if len(values) % 2:
+            raise CompileError("response headers require name/value pairs")
+        return {"values": values}
+    if action == "response-body-replace-regex":
+        pattern = str(arguments.get("pattern", ""))
+        replacement = arguments.get("replacement")
+        if not pattern or len(pattern) > 4096 or not isinstance(replacement, str):
+            raise CompileError("response regex replacement is invalid")
+        re.compile(pattern)
+        return {"pattern": pattern, "replacement": replacement}
+    if action == "response-body-text-replace":
+        pairs = arguments.get("pairs")
+        if (not isinstance(pairs, list) or not pairs or len(pairs) > 32
+                or any(not isinstance(pair, list) or len(pair) != 2
+                       or not isinstance(pair[0], str) or not pair[0]
+                       or not isinstance(pair[1], str)
+                       or len(pair[0]) > 16_384 or len(pair[1]) > 16_384
+                       for pair in pairs)):
+            raise CompileError("text replacement pairs are invalid")
+        return {"pairs": pairs}
+    if action == "response-body-html-remove":
+        tag = str(arguments.get("tag", "div")).lower()
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", tag):
+            raise CompileError("HTML removal tag is invalid")
+        markers = _string_list(arguments.get("markers"), "HTML removal markers", limit=16,
+                               item_chars=256)
+        return {"tag": tag, "markers": markers}
+    if action == "response-body-html-json-jq":
+        element_id = str(arguments.get("element_id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", element_id):
+            raise CompileError("embedded JSON element id is invalid")
+        return {
+            "element_id": element_id,
+            "program": _validate_jq_program(arguments.get("program", "")),
+        }
+    if action in {"request-header-mock", "response-request-header-mock"}:
+        headers = arguments.get("headers")
+        if not isinstance(headers, list) or not headers or len(headers) > 8:
+            raise CompileError("request header conditions are invalid")
+        parsed_headers = []
+        for item in headers:
+            if not isinstance(item, dict):
+                raise CompileError("request header condition must be an object")
+            name = str(item.get("name", "")).strip().lower()
+            pattern = str(item.get("pattern", ""))
+            if (not re.fullmatch(r"[a-z0-9-]{1,64}", name) or not pattern
+                    or len(pattern) > 2048):
+                raise CompileError("request header condition is invalid")
+            re.compile(pattern)
+            parsed_headers.append({"name": name, "pattern": pattern})
+        mode = str(arguments.get("mode", "any")).lower()
+        if mode not in {"any", "all"}:
+            raise CompileError("request header condition mode must be any or all")
+        status = int(arguments.get("status", 200))
+        body = str(arguments.get("body", ""))
+        content_type = str(arguments.get("content_type", "text"))
+        if not 100 <= status <= 599 or len(body.encode()) > 65_536:
+            raise CompileError("request header mock response is invalid")
+        if content_type not in {"text", "json", "html", "binary"}:
+            raise CompileError("request header mock content type is invalid")
+        return {
+            "headers": parsed_headers, "mode": mode, "status": status,
+            "body": body, "content_type": content_type,
+        }
+    raise CompileError(f"unsupported script conversion action {action}")
+
+
+def _script_declarations(lines):
+    scripts = []
+    for line in lines:
+        fields = line.split(None, 2)
+        if not fields or fields[0] not in {"http-request", "http-response"}:
+            continue
+        if len(fields) != 3:
+            scripts.append({"phase": "", "pattern": "", "script_url": ""})
+            continue
+        directive, pattern, remainder = fields
+        match = re.search(
+            r"(?:^|,\s*)(?:script-path|script_url)\s*=\s*(\"[^\"]+\"|[^,\s]+)",
+            remainder,
+        )
+        script_url = match.group(1).strip('"') if match else ""
+        try:
+            re.compile(pattern)
+        except re.error:
+            pattern = ""
+        scripts.append({
+            "phase": directive.split("-", 1)[1],
+            "pattern": pattern,
+            "script_url": script_url,
+        })
+    return scripts
+
+
+def _external_jq_url(arguments):
+    values = _tokens(arguments)
+    if len(values) != 1 or not values[0].startswith("jq-path="):
+        return None
+    return _https_url(values[0].split("=", 1)[1], "jq-path")
 
 
 def _module_hosts(lines):
@@ -217,10 +391,136 @@ def _pattern_target_hosts(pattern, hosts):
     return {host for host in hosts if host_pattern.fullmatch(host)}
 
 
-def parse_module(text, name, source_url=""):
+def _private_items(config, key, limit):
+    items = config.get(key, []) if isinstance(config, dict) else []
+    if not isinstance(items, list) or len(items) > limit:
+        raise CompileError(f"{key} must be a list with at most {limit} entries")
+    if any(not isinstance(item, dict) for item in items):
+        raise CompileError(f"{key} entries must be objects")
+    return items
+
+
+def _resource_pins(config):
+    conversions = _private_items(
+        config, "script_conversions", MAX_PINNED_RESOURCES)
+    jq_pins = _private_items(config, "external_jq_pins", MAX_PINNED_RESOURCES)
+    pins = {}
+    labels = {}
+    resources = ([(item, "script_url", "script conversion") for item in conversions]
+                 + [(item, "url", "external jq") for item in jq_pins])
+    for item, url_key, label in resources:
+        url = _https_url(item.get(url_key), label)
+        digest = str(item.get("sha256", "")).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise CompileError(f"{label} requires a lowercase SHA256")
+        if url in pins and pins[url] != digest:
+            raise CompileError(f"conflicting SHA256 pins for {url}")
+        pins[url] = digest
+        labels[url] = str(item.get("name") or label)[:80]
+    if len(pins) > MAX_PINNED_RESOURCES:
+        raise CompileError(
+            f"private resources exceed the {MAX_PINNED_RESOURCES}-resource limit")
+    return conversions, jq_pins, pins, labels
+
+
+def _fetch_pinned_resources(config, fetcher):
+    conversions, jq_pins, pins, labels = _resource_pins(config)
+    active = {}
+    stale = set()
+    failures = []
+    items = [{"url": url} for url in pins]
+    for batch in _fetched_source_batches(items, fetcher):
+        for item, future in batch:
+            url = item["url"]
+            try:
+                text = future.result()
+            except Exception as exc:
+                failures.append({
+                    "name": labels[url],
+                    "error": f"pinned resource unavailable: {str(exc)[:160]}",
+                })
+                continue
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            if digest != pins[url]:
+                stale.add(url)
+                continue
+            active[url] = text
+    return conversions, jq_pins, active, stale, failures
+
+
+def _script_conversion_map(conversions, active_resources):
+    result = {}
+    configured_entries = 0
+    configured_rules = 0
+    active_entries = 0
+    for group in conversions:
+        script_url = _https_url(group.get("script_url"), "script conversion")
+        entries = group.get("entries")
+        if not isinstance(entries, list) or not entries:
+            raise CompileError("script conversion entries must be a non-empty list")
+        configured_entries += len(entries)
+        if configured_entries > MAX_SCRIPT_CONVERSION_ENTRIES:
+            raise CompileError(
+                f"script conversions exceed the {MAX_SCRIPT_CONVERSION_ENTRIES}-entry limit")
+        group_active = script_url in active_resources
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise CompileError("script conversion entry must be an object")
+            phase = str(entry.get("phase", "")).lower()
+            pattern = str(entry.get("pattern", ""))
+            if phase not in {"request", "response"} or not pattern or len(pattern) > 4096:
+                raise CompileError("script conversion phase or pattern is invalid")
+            re.compile(pattern)
+            raw_rules = entry.get("rules")
+            if not isinstance(raw_rules, list) or not raw_rules:
+                raise CompileError("script conversion rules must be a non-empty list")
+            configured_rules += len(raw_rules)
+            if configured_rules > MAX_SCRIPT_CONVERSION_RULES:
+                raise CompileError(
+                    f"script conversions exceed the {MAX_SCRIPT_CONVERSION_RULES}-rule limit")
+            compiled_rules = []
+            for raw in raw_rules:
+                if not isinstance(raw, dict):
+                    raise CompileError("script conversion rule must be an object")
+                action = str(raw.get("action", ""))
+                if action not in CONVERSION_ACTIONS:
+                    raise CompileError(f"unsupported script conversion action {action}")
+                if (phase == "request") != (action in REQUEST_ACTIONS):
+                    raise CompileError("script conversion action does not match its phase")
+                rule_pattern = str(raw.get("pattern") or pattern)
+                if not rule_pattern or len(rule_pattern) > 4096:
+                    raise CompileError("script conversion rule pattern is invalid")
+                re.compile(rule_pattern)
+                compiled_rules.append({
+                    "pattern": rule_pattern,
+                    "action": action,
+                    "arguments": _conversion_arguments(action, raw.get("arguments", {})),
+                })
+            key = (script_url, phase, pattern)
+            if key in result:
+                raise CompileError("duplicate script conversion entry")
+            if group_active:
+                result[key] = compiled_rules
+                active_entries += 1
+    return result, {
+        "script_conversion_entries": configured_entries,
+        "active_script_conversion_entries": active_entries,
+        "script_conversion_rules": configured_rules,
+    }
+
+
+def _external_jq_programs(jq_pins, active_resources):
+    programs = {}
+    for item in jq_pins:
+        url = _https_url(item.get("url"), "external jq")
+        if url in active_resources:
+            programs[url] = _validate_jq_program(active_resources[url])
+    return programs
+
+
+def parse_module(text, name, source_url="", script_conversions=None, external_jq=None):
     sections = {}
     section = None
-    scripts = 0
     for raw in str(text).splitlines():
         line = raw.strip()
         match = re.fullmatch(r"\[([^]]+)\]", line)
@@ -231,13 +531,15 @@ def parse_module(text, name, source_url=""):
         if not line or line.startswith("#") or section is None:
             continue
         sections.setdefault(section, []).append(line)
-        if section == "Script" and line.startswith(("http-request ", "http-response ")):
-            scripts += 1
 
     hosts, skipped_hosts = _module_hosts(sections.get("MitM", []))
+    scripts = _script_declarations(sections.get("Script", []))
+    script_conversions = script_conversions or {}
+    external_jq = external_jq or {}
     rules = []
     unsupported = Counter()
     invalid = 0
+    imported_external_jq = 0
     for line in sections.get("Rewrite", []):
         try:
             pattern, remainder = line.split(None, 1)
@@ -250,7 +552,15 @@ def parse_module(text, name, source_url=""):
             continue
         try:
             re.compile(pattern)
-            parsed = parse_action(action, arguments.strip())
+            jq_url = (_external_jq_url(arguments.strip())
+                      if action == "response-body-json-jq" else None)
+            if jq_url is not None:
+                if jq_url not in external_jq:
+                    raise CompileError("external jq program is not pinned or changed")
+                parsed = {"program": external_jq[jq_url]}
+                imported_external_jq += 1
+            else:
+                parsed = parse_action(action, arguments.strip())
         except (CompileError, re.error):
             unsupported[action] += 1
             continue
@@ -260,6 +570,20 @@ def parse_module(text, name, source_url=""):
             "arguments": parsed,
             "source": str(name)[:80],
         })
+
+    converted_scripts = 0
+    converted_script_rules = 0
+    for script in scripts:
+        templates = script_conversions.get((
+            script["script_url"], script["phase"], script["pattern"]))
+        if not templates:
+            continue
+        converted_scripts += 1
+        for template in templates:
+            rule = dict(template)
+            rule["source"] = (str(name)[:65] + " (script)")[:80]
+            rules.append(rule)
+            converted_script_rules += 1
 
     active_hosts = set()
     for rule in rules:
@@ -274,9 +598,13 @@ def parse_module(text, name, source_url=""):
         "rules": rules,
         "stats": {
             "supported_rewrites": len(rules),
+            "converted_script_rules": converted_script_rules,
             "unsupported_rewrites": sum(unsupported.values()) + invalid,
             "unsupported_actions": dict(sorted(unsupported.items())),
-            "unported_scripts": scripts,
+            "script_declarations": len(scripts),
+            "converted_scripts": converted_scripts,
+            "unported_scripts": len(scripts) - converted_scripts,
+            "imported_external_jq": imported_external_jq,
             "skipped_hosts": skipped_hosts,
             "unused_hosts": len(hosts - active_hosts),
         },
@@ -328,17 +656,26 @@ def mitm_excluded_hosts(config):
 def compile_sources(config, fetcher=fetch_text):
     items = _enabled_source_items(config, "sources")
     configured_exclusions = set(mitm_excluded_hosts(config))
+    conversions, jq_pins, active_resources, stale_resources, resource_failures = \
+        _fetch_pinned_resources(config, fetcher)
+    conversion_map, conversion_stats = _script_conversion_map(
+        conversions, active_resources)
+    external_jq = _external_jq_programs(jq_pins, active_resources)
     compiled_sources = []
     rules = []
     declared_hosts = set()
     seen_rules = set()
-    failures = []
+    failures = list(resource_failures)
     for batch in _fetched_source_batches(items, fetcher):
         for item, future in batch:
             name = str(item.get("name") or "unnamed")[:80]
             url = str(item.get("url") or "")
             try:
-                module = parse_module(future.result(), name, url)
+                module = parse_module(
+                    future.result(), name, url,
+                    script_conversions=conversion_map,
+                    external_jq=external_jq,
+                )
             except Exception as exc:  # one unavailable source must not discard the others
                 failures.append({"name": name, "error": str(exc)[:200]})
                 continue
@@ -360,10 +697,23 @@ def compile_sources(config, fetcher=fetch_text):
         "declared_host_count": len(declared_hosts),
         "excluded_host_count": len(excluded_hosts),
         "rule_count": len(rules),
+        "script_declarations": sum(
+            s["stats"].get("script_declarations", 0) for s in compiled_sources),
+        "converted_scripts": sum(
+            s["stats"].get("converted_scripts", 0) for s in compiled_sources),
         "unported_scripts": sum(s["stats"]["unported_scripts"] for s in compiled_sources),
+        "converted_script_rules": sum(
+            s["stats"].get("converted_script_rules", 0) for s in compiled_sources),
+        "external_jq_pins": len(jq_pins),
+        "active_external_jq_pins": len(external_jq),
+        "imported_external_jq": sum(
+            s["stats"].get("imported_external_jq", 0) for s in compiled_sources),
+        "pinned_resource_failures": len(resource_failures),
+        "stale_pinned_resources": len(stale_resources),
         "unsupported_rewrites": sum(s["stats"]["unsupported_rewrites"] for s in compiled_sources),
         "unused_hosts": sum(s["stats"].get("unused_hosts", 0) for s in compiled_sources),
     }
+    stats.update(conversion_stats)
     return {
         "version": 2,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -748,7 +1098,7 @@ def merge_source_defaults(path, defaults_path):
     if not isinstance(current, dict) or not isinstance(defaults, dict):
         raise CompileError("source configs must be JSON objects")
     changed = False
-    for key in ("sources", "domain_sources"):
+    for key in ("sources", "domain_sources", "script_conversions", "external_jq_pins"):
         if key not in current and key in defaults:
             current[key] = defaults[key]
             changed = True

@@ -27,6 +27,8 @@ original_ctx = wloc.MITM_CTX
 wloc.MITM_CTX = type("Context", (), {"log": legacy_log})()
 wloc._log("warning", "invalid payload: %s", "passthrough")
 assert legacy_log.warnings == ["invalid payload: passthrough"]
+wloc.MITM_CTX = object()
+wloc._log("info", "standalone import")
 wloc.MITM_CTX = original_ctx
 
 

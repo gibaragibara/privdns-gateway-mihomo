@@ -31,5 +31,7 @@
     {"name": "Cats-Team AdRules", "url": "https://raw.githubusercontent.com/Cats-Team/AdRules/main/adrules.list", "format": "classical", "enabled": true},
     {"name": "AWAvenue Ads Rule", "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/refs/heads/main/Filters/AWAvenue-Ads-Rule-Surge-RULE-SET.list", "format": "classical", "enabled": true}
   ],
-  "local_domain_rules": []
+  "local_domain_rules": [],
+  "script_conversions": [],
+  "external_jq_pins": []
 }

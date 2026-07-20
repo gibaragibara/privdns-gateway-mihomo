@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the declarative Loon/Egern adblock compiler."""
 import importlib.util
+import hashlib
 import json
 import os
 import stat
@@ -26,6 +27,7 @@ MODULE = r'''
 ^https:\/\/api\.example\.com\/external response-body-json-jq jq-path="https://example.com/a.jq"
 [Script]
 http-response ^https:\/\/api\.example\.com script-path=https://example.com/a.js
+cron "0 0 * * *" script-path=https://example.com/daily.js
 [MitM]
 hostname=api.example.com, *.wild.example.com
 '''
@@ -43,9 +45,13 @@ assert parsed["rules"][3]["arguments"]["body"] == '{"ok":true}'
 assert all(rule["hosts"] == ["api.example.com"] for rule in parsed["rules"])
 assert parsed["stats"] == {
     "supported_rewrites": 4,
+    "converted_script_rules": 0,
     "unsupported_rewrites": 1,
     "unsupported_actions": {"response-body-json-jq": 1},
+    "script_declarations": 1,
+    "converted_scripts": 0,
     "unported_scripts": 1,
+    "imported_external_jq": 0,
     "skipped_hosts": 1,
     "unused_hosts": 0,
 }
@@ -74,8 +80,95 @@ assert compiled["stats"]["host_count"] == 1
 assert compiled["stats"]["declared_host_count"] == 1
 assert compiled["stats"]["excluded_host_count"] == 0
 assert compiled["stats"]["rule_count"] == 4
+assert compiled["stats"]["script_declarations"] == 1
+assert compiled["stats"]["converted_scripts"] == 0
 assert compiled["stats"]["unported_scripts"] == 1
 assert compiled["failures"] == []
+
+SCRIPT_TEXT = "const pinned = true;\n"
+JQ_TEXT = ".external = true\n"
+
+
+def private_fetch(url):
+    return {
+        "https://example.com/one": MODULE,
+        "https://example.com/a.js": SCRIPT_TEXT,
+        "https://example.com/a.jq": JQ_TEXT,
+    }[url]
+
+
+private_config = {
+    "sources": [{"name": "one", "url": "https://example.com/one"}],
+    "script_conversions": [{
+        "name": "example script",
+        "script_url": "https://example.com/a.js",
+        "sha256": hashlib.sha256(SCRIPT_TEXT.encode()).hexdigest(),
+        "entries": [{
+            "phase": "response",
+            "pattern": r"^https:\/\/api\.example\.com",
+            "rules": [{
+                "action": "response-body-json-jq",
+                "arguments": {"program": ".script_converted = true"},
+            }],
+        }],
+    }],
+    "external_jq_pins": [{
+        "name": "example jq",
+        "url": "https://example.com/a.jq",
+        "sha256": hashlib.sha256(JQ_TEXT.encode()).hexdigest(),
+    }],
+}
+converted = sync.compile_sources(private_config, fetcher=private_fetch)
+assert converted["stats"]["rule_count"] == 6
+assert converted["stats"]["script_declarations"] == 1
+assert converted["stats"]["converted_scripts"] == 1
+assert converted["stats"]["unported_scripts"] == 0
+assert converted["stats"]["converted_script_rules"] == 1
+assert converted["stats"]["imported_external_jq"] == 1
+assert converted["stats"]["unsupported_rewrites"] == 0
+assert converted["stats"]["stale_pinned_resources"] == 0
+assert converted["stats"]["active_script_conversion_entries"] == 1
+assert any(rule["source"] == "one (script)" for rule in converted["rules"])
+
+stale_script = sync.compile_sources(
+    private_config,
+    fetcher=lambda url: "changed\n" if url.endswith("a.js") else private_fetch(url),
+)
+assert stale_script["stats"]["converted_scripts"] == 0
+assert stale_script["stats"]["unported_scripts"] == 1
+assert stale_script["stats"]["stale_pinned_resources"] == 1
+assert stale_script["stats"]["rule_count"] == 5
+
+stale_jq = sync.compile_sources(
+    private_config,
+    fetcher=lambda url: "changed\n" if url.endswith("a.jq") else private_fetch(url),
+)
+assert stale_jq["stats"]["converted_scripts"] == 1
+assert stale_jq["stats"]["imported_external_jq"] == 0
+assert stale_jq["stats"]["unsupported_rewrites"] == 1
+assert stale_jq["stats"]["rule_count"] == 5
+
+resource_failure = sync.compile_sources(
+    private_config,
+    fetcher=lambda url: (_ for _ in ()).throw(RuntimeError("offline"))
+    if url.endswith("a.js") else private_fetch(url),
+)
+assert resource_failure["stats"]["pinned_resource_failures"] == 1
+assert resource_failure["stats"]["failed_sources"] == 1
+assert "pinned resource unavailable" in resource_failure["failures"][0]["error"]
+
+for invalid_private in (
+    {"script_conversions": "bad"},
+    {"script_conversions": [{"script_url": "http://example.com/a.js",
+                              "sha256": "0" * 64, "entries": []}]},
+    {"external_jq_pins": [{"url": "https://example.com/a.jq", "sha256": "BAD"}]},
+):
+    try:
+        sync.compile_sources(invalid_private, fetcher=lambda _url: "")
+    except sync.CompileError:
+        pass
+    else:
+        raise AssertionError(f"invalid private conversion config accepted: {invalid_private!r}")
 
 excluded = sync.compile_sources({
     "sources": [{"name": "one", "url": "https://example.com/one"}],

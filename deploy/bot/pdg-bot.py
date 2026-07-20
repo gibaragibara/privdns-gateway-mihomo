@@ -50,6 +50,7 @@ ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
 ADBLOCK_CLASSICAL_PROVIDER = "__pdg_adblock_reject_classical"
 ADBLOCK_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
 ADBLOCK_SOURCE_LIMIT = 64
+ADBLOCK_PRIVATE_RESOURCE_LIMIT = 128
 ADBLOCK_FETCH_WORKERS = 4
 ADBLOCK_COMPATIBILITY_LIMIT = 256
 MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
@@ -284,6 +285,7 @@ def _adblock_hosts():
 
 def _adblock_source_config(strict=False):
     empty = {"sources": [], "domain_sources": [], "local_domain_rules": [],
+             "script_conversions": [], "external_jq_pins": [],
              "mitm_exclude_hosts": [], "compatibility_routes": []}
     try:
         with open(ADBLOCK_SOURCES, encoding="utf-8") as file:
@@ -299,6 +301,7 @@ def _adblock_source_config(strict=False):
             raise ValueError("去广告来源配置不是 JSON 对象，已拒绝覆盖；请先恢复配置")
         return empty
     for key in ("sources", "domain_sources", "local_domain_rules",
+                "script_conversions", "external_jq_pins",
                 "mitm_exclude_hosts", "compatibility_routes"):
         if key not in config:
             config[key] = []
@@ -585,6 +588,12 @@ def _adblock_page():
     generated = str(payload.get("generated_at") or "未同步") if isinstance(payload, dict) else "未同步"
     source_config = _adblock_source_config()
     compatibility_count = len(_adblock_compatibility_routes(source_config))
+    script_total = int(stats.get("script_declarations", 0) or 0)
+    converted_scripts = int(stats.get("converted_scripts", 0) or 0)
+    unported_scripts = int(stats.get("unported_scripts", 0) or 0)
+    imported_jq = int(stats.get("imported_external_jq", 0) or 0)
+    jq_pins = int(stats.get("external_jq_pins", 0) or 0)
+    stale_resources = int(stats.get("stale_pinned_resources", 0) or 0)
     text = ("🛡 <b>服务端去广告</b>\n"
             "普通 REJECT 规则由 mihomo 直接拦截；响应改写复用共享 CA。\n\n"
             f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
@@ -596,11 +605,14 @@ def _adblock_page():
             f"排除 MITM: {int(stats.get('excluded_host_count', 0) or 0)}\n"
             f"普通规则源: {int(stats.get('domain_source_count', 0) or 0)}  "
             f"REJECT: {int(stats.get('domain_rule_count', 0) or 0)}\n"
-            f"未移植脚本: {int(stats.get('unported_scripts', 0) or 0)}  "
+            f"脚本转换: {converted_scripts}/{script_total}  "
+            f"剩余: {unported_scripts}\n"
+            f"外部 jq: {imported_jq}/{jq_pins}  "
             f"未支持重写: {int(stats.get('unsupported_rewrites', 0) or 0)}\n"
+            f"固定资源失效: {stale_resources}\n"
             f"最近同步: <code>{_esc(generated)}</code>\n\n"
             "自动更新: 每日 04:30（含普通 REJECT 与 MITM 插件）\n\n"
-            "MITM 只执行 reject、mock、JSON 路径修改及受限 jq；不会执行远程 JavaScript。")
+            "MITM 只执行已固定哈希的安全转换；不会直接执行远程 JavaScript。")
     rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
     rows.append([
         {"text": "📚 REJECT 规则源", "callback_data": "adblock_domain_sources"},
@@ -1192,11 +1204,18 @@ def _adblock_sync_timeout():
         if count > ADBLOCK_SOURCE_LIMIT:
             raise ValueError(f"去广告来源配置中的 {key} 超过 {ADBLOCK_SOURCE_LIMIT} 个")
         counts.append(count)
+    private_count = sum(len(config[key]) for key in (
+        "script_conversions", "external_jq_pins"))
+    if private_count > ADBLOCK_PRIVATE_RESOURCE_LIMIT:
+        raise ValueError(
+            f"去广告固定资源超过 {ADBLOCK_PRIVATE_RESOURCE_LIMIT} 个")
     module_batches = math.ceil(counts[0] / ADBLOCK_FETCH_WORKERS)
     domain_batches = math.ceil(counts[1] / ADBLOCK_FETCH_WORKERS)
+    private_batches = math.ceil(private_count / ADBLOCK_FETCH_WORKERS)
     # Four downloads run concurrently per compiler batch. Leave enough time for
     # every curl deadline, the 120-second MRS conversion, and process overhead.
-    return max(180, 240 + module_batches * 30 + domain_batches * 50)
+    return max(180, 240 + module_batches * 30 + domain_batches * 50
+               + private_batches * 30)
 
 
 def _adblock_sync_rules():
@@ -1373,7 +1392,11 @@ def enable_adblock():
                       f"兼容排除: {detail.get('excluded_host_count', 0)} 主机\n"
                       f"普通 REJECT: {detail.get('domain_source_count', 0)} 源 / "
                       f"{detail.get('domain_rule_count', 0)} 规则\n"
-                      f"未执行远程脚本: {detail.get('unported_scripts', 0)}")
+                      f"脚本转换: {detail.get('converted_scripts', 0)}/"
+                      f"{detail.get('script_declarations', 0)}；"
+                      f"剩余 {detail.get('unported_scripts', 0)}\n"
+                      f"外部 jq: {detail.get('imported_external_jq', 0)}/"
+                      f"{detail.get('external_jq_pins', 0)}")
 
 def disable_adblock():
     with _mitm_config_lock():
@@ -1432,7 +1455,7 @@ def add_adblock_plugin(url):
                 return False, message
         return True, (f"✅ 已添加插件 {_adblock_plugin_name(url)}；"
                       f"声明式重写 {detail.get('supported_rewrites', 0)} 条，"
-                      f"未执行脚本 {detail.get('unported_scripts', 0)} 条")
+                      f"待匹配脚本转换 {detail.get('unported_scripts', 0)} 条")
 
 def delete_adblock_plugin(source_id):
     with _mitm_config_lock():
