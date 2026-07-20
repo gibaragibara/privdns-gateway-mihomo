@@ -7,7 +7,7 @@
 | | 上游 | 本仓 |
 |--|--|--|
 | DNS | mosdns | mosdns(同源,含 WhatsApp 真实 IP 支路等增强) |
-| 流量 | sing-box direct+sniff | **mihomo `tproxy-port` + sniffer** |
+| 流量 | sing-box direct+sniff | **mihomo `tproxy-port` + sniffer（1.19.27-pdg1）** |
 | 更新策略 | 跟上游 `v*` tag | 本仓独立打 `v*` tag(`pdg update` 只跟本仓 tag) |
 
 **不要用 GitHub「Sync fork」一键同步上游。** 架构已分叉,强合会冲突并把 sing-box 文件冲回来。需要上游新功能时:看上游 CHANGELOG / commit,再 cherry-pick 或手工移植到 mihomo 路径。详见 [UPSTREAM.md](UPSTREAM.md)。

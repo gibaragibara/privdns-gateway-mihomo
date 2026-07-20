@@ -40,6 +40,7 @@ assert parsed["rules"][1]["arguments"]["pairs"] == [
     ["data.enabled", False], ["data.items", []],
 ]
 assert parsed["rules"][3]["arguments"]["body"] == '{"ok":true}'
+assert all(rule["hosts"] == ["api.example.com"] for rule in parsed["rules"])
 assert parsed["stats"] == {
     "supported_rewrites": 4,
     "unsupported_rewrites": 1,
@@ -59,6 +60,7 @@ hostname=api.example.com, app.example.com, script-only.example.com
 '''
 grouped = sync.parse_module(GROUPED_MODULE, "grouped")
 assert grouped["hosts"] == ["api.example.com", "app.example.com"]
+assert grouped["rules"][0]["hosts"] == ["api.example.com", "app.example.com"]
 assert grouped["stats"]["unused_hosts"] == 1
 assert grouped["stats"]["unported_scripts"] == 1
 
@@ -236,6 +238,7 @@ assert compiled_domains["stats"] == {
     "domain_source_count": 2,
     "domain_failed_sources": 0,
     "domain_rule_count": 6,
+    "domain_local_rule_count": 0,
     "domain_unsupported_lines": 2,
 }
 domain_rules, classical_rules = sync.split_domain_rules(compiled_domains["rules"])
@@ -252,6 +255,35 @@ assert auto_domains == [
     "+.tracker.auto.example", "*.wild.auto.example",
 ]
 assert auto_classical == ["DOMAIN-KEYWORD,ad-token"]
+
+compiled_local = sync.compile_domain_sources({
+    "domain_sources": [],
+    "local_domain_rules": [
+        "local-exact.example",
+        "+.local-suffix.example",
+        "DOMAIN,local-exact.example",
+        "DOMAIN-KEYWORD,local-ad-token",
+    ],
+})
+assert compiled_local["rules"] == [
+    "DOMAIN,local-exact.example",
+    "DOMAIN-SUFFIX,local-suffix.example",
+    "DOMAIN-KEYWORD,local-ad-token",
+]
+assert compiled_local["stats"] == {
+    "domain_source_count": 0,
+    "domain_failed_sources": 0,
+    "domain_rule_count": 3,
+    "domain_local_rule_count": 3,
+    "domain_unsupported_lines": 0,
+}
+for invalid_local in ("not-a-list", [7], ["PROCESS-NAME,bad"]):
+    try:
+        sync.compile_domain_sources({"local_domain_rules": invalid_local})
+    except sync.CompileError:
+        pass
+    else:
+        raise AssertionError(f"invalid local rules accepted: {invalid_local!r}")
 
 original_total_rule_limit = sync.MAX_DOMAIN_RULES_TOTAL
 sync.MAX_DOMAIN_RULES_TOTAL = 2

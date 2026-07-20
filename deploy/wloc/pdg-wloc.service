@@ -11,7 +11,7 @@ User=pdg-wloc
 Group=pdg-wloc
 Environment=HOME=/var/lib/pdg-wloc
 WorkingDirectory=/var/lib/pdg-wloc
-ExecStart=/usr/bin/mitmdump --mode regular --listen-host 127.0.0.1 --listen-port 9080 --set confdir=/var/lib/pdg-wloc/mitmproxy --set connection_strategy=lazy --set block_global=false --scripts /opt/pdg-bot/wloc_mitm.py --scripts /opt/pdg-bot/adblock_mitm.py
+ExecStart=/usr/bin/mitmdump --mode regular --listen-host 127.0.0.1 --listen-port 9080 --set confdir=/var/lib/pdg-wloc/mitmproxy --set connection_strategy=lazy --set upstream_cert=false --set block_global=false --scripts /opt/pdg-bot/wloc_mitm.py --scripts /opt/pdg-bot/adblock_mitm.py
 Restart=on-failure
 RestartSec=3
 UMask=0077

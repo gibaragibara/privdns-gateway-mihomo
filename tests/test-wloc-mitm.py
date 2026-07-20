@@ -14,6 +14,22 @@ assert spec.loader is not None
 spec.loader.exec_module(wloc)
 
 
+class LegacyMitmLog:
+    def __init__(self):
+        self.warnings = []
+
+    def warn(self, message):
+        self.warnings.append(message)
+
+
+legacy_log = LegacyMitmLog()
+original_ctx = wloc.MITM_CTX
+wloc.MITM_CTX = type("Context", (), {"log": legacy_log})()
+wloc._log("warning", "invalid payload: %s", "passthrough")
+assert legacy_log.warnings == ["invalid payload: passthrough"]
+wloc.MITM_CTX = original_ctx
+
+
 def location(lat, lon, accuracy):
     return b"".join((
         wloc.encode_field(1, 0, round(lat * 100_000_000)),

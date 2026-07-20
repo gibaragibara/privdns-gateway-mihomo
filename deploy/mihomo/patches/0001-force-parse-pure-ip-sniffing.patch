@@ -1,0 +1,36 @@
+diff --git a/component/sniffer/dispatcher.go b/component/sniffer/dispatcher.go
+index 1dafcf1..f150bba 100644
+--- a/component/sniffer/dispatcher.go
++++ b/component/sniffer/dispatcher.go
+@@ -56,0 +57,6 @@ func (sd *Dispatcher) forceSniff(metadata *C.Metadata) bool {
++	// parse-pure-ip explicitly asks the dispatcher to sniff connections with no
++	// domain metadata. Treat those as forced so a failure for one connection
++	// cannot poison the destination-wide skip cache used by later connections.
++	if sd.parsePureIp && metadata.Host == "" {
++		return true
++	}
+diff --git a/component/sniffer/dispatcher_test.go b/component/sniffer/dispatcher_test.go
+new file mode 100644
+--- /dev/null
++++ b/component/sniffer/dispatcher_test.go
+@@ -0,0 +1,20 @@
++package sniffer
++
++import (
++	"testing"
++
++	C "github.com/metacubex/mihomo/constant"
++)
++
++func TestParsePureIPForcesSniff(t *testing.T) {
++	dispatcher := &Dispatcher{parsePureIp: true}
++	metadata := &C.Metadata{}
++	if !dispatcher.forceSniff(metadata) {
++		t.Fatal("parse-pure-ip connection must bypass the destination failure cache")
++	}
++
++	metadata.Host = "example.com"
++	if dispatcher.forceSniff(metadata) {
++		t.Fatal("domain metadata must still follow the regular force-domain matchers")
++	}
++}

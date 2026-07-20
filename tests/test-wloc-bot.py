@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory() as td:
             {"name": "插件二", "url": "https://example.com/two.lpx", "enabled": True},
         ],
         "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
+        "local_domain_rules": ["ads.private.example"],
         "mitm_exclude_hosts": ["api.example.com"],
         "compatibility_routes": [
             {"type": "domain", "value": "api.example.com", "outbound": "residential"},
@@ -146,6 +147,7 @@ with tempfile.TemporaryDirectory() as td:
     ok, _ = bot.delete_adblock_domain_source(bot._adblock_source_id(domain_url))
     assert ok and len(bot._adblock_domain_sources()) == 1
     preserved_config = bot._adblock_source_config()
+    assert preserved_config["local_domain_rules"] == ["ads.private.example"]
     assert preserved_config["mitm_exclude_hosts"] == ["api.example.com"]
     assert len(preserved_config["compatibility_routes"]) == 2
 

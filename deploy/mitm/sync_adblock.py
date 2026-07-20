@@ -31,6 +31,7 @@ MAX_MITM_EXCLUDED_HOSTS = 256
 MAX_DOMAIN_SOURCE_LINES = 500_000
 MAX_DOMAIN_RULES_PER_SOURCE = 400_000
 MAX_DOMAIN_RULES_TOTAL = 600_000
+MAX_LOCAL_DOMAIN_RULES = 4096
 MAX_DOMAIN_LINE_CHARS = 4096
 SOURCE_FETCH_WORKERS = 4
 SUPPORTED_ACTIONS = {
@@ -262,7 +263,9 @@ def parse_module(text, name, source_url=""):
 
     active_hosts = set()
     for rule in rules:
-        active_hosts.update(_pattern_target_hosts(rule["pattern"], hosts))
+        targets = sorted(_pattern_target_hosts(rule["pattern"], hosts))
+        rule["hosts"] = targets
+        active_hosts.update(targets)
 
     return {
         "name": str(name)[:80],
@@ -362,7 +365,7 @@ def compile_sources(config, fetcher=fetch_text):
         "unused_hosts": sum(s["stats"].get("unused_hosts", 0) for s in compiled_sources),
     }
     return {
-        "version": 1,
+        "version": 2,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "hosts": sorted(hosts),
         "excluded_hosts": sorted(excluded_hosts),
@@ -563,6 +566,29 @@ def parse_domain_source(text, name, source_url="", source_format="classical"):
     }
 
 
+def local_domain_rules(config):
+    """Compile server-only rules kept outside the repository and remote feeds."""
+    items = config.get("local_domain_rules", []) if isinstance(config, dict) else []
+    if not isinstance(items, list):
+        raise CompileError("local_domain_rules must be a list")
+    if len(items) > MAX_LOCAL_DOMAIN_RULES:
+        raise CompileError(
+            f"local_domain_rules exceeds the {MAX_LOCAL_DOMAIN_RULES}-rule limit")
+    rules = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise CompileError("local_domain_rules entries must be strings")
+        try:
+            rule = _auto_domain_rule(item)
+        except CompileError as exc:
+            raise CompileError(f"invalid local domain rule: {item[:80]}") from exc
+        if rule not in seen:
+            seen.add(rule)
+            rules.append(rule)
+    return rules
+
+
 def compile_domain_sources(config, fetcher=fetch_domain_text):
     items = _enabled_source_items(config, "domain_sources")
     sources = []
@@ -588,6 +614,15 @@ def compile_domain_sources(config, fetcher=fetch_domain_text):
                         f"compiled domain rules exceed the {MAX_DOMAIN_RULES_TOTAL}-rule limit")
                 seen.add(rule)
                 rules.append(rule)
+    local_rules = local_domain_rules(config)
+    for rule in local_rules:
+        if rule in seen:
+            continue
+        if len(rules) >= MAX_DOMAIN_RULES_TOTAL:
+            raise CompileError(
+                f"compiled domain rules exceed the {MAX_DOMAIN_RULES_TOTAL}-rule limit")
+        seen.add(rule)
+        rules.append(rule)
     return {
         "rules": rules,
         "sources": sources,
@@ -596,6 +631,7 @@ def compile_domain_sources(config, fetcher=fetch_domain_text):
             "domain_source_count": len(sources),
             "domain_failed_sources": len(failures),
             "domain_rule_count": len(rules),
+            "domain_local_rule_count": len(local_rules),
             "domain_unsupported_lines": sum(
                 source["stats"]["unsupported_lines"] for source in sources),
         },

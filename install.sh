@@ -146,11 +146,11 @@ if ! command -v mosdns >/dev/null; then
 fi
 
 # ── 3. mihomo ──
-if ! mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}"; then
-  c_g "下载 mihomo $MIHOMO_VER ($MARCH)…"
+if ! mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}-${MIHOMO_PATCH_VER}"; then
+  c_g "下载 mihomo $MIHOMO_VER-$MIHOMO_PATCH_VER ($MARCH)…"
   t=$(mktemp -d)
-  curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VER}/mihomo-linux-${MARCH}-v${MIHOMO_VER}.gz" -o "$t/mihomo.gz"
-  pdg_verify_sha256 "$t/mihomo.gz" "$(pdg_sha256 "mihomo-$MARCH")" "mihomo $MIHOMO_VER ($MARCH)" \
+  curl -fsSL "$(pdg_mihomo_url "$MARCH")" -o "$t/mihomo.gz"
+  pdg_verify_sha256 "$t/mihomo.gz" "$(pdg_sha256 "mihomo-$MARCH")" "mihomo $MIHOMO_VER-$MIHOMO_PATCH_VER ($MARCH)" \
     || { rm -rf "$t"; die "mihomo 二进制校验未通过 → 拒绝安装(供应链异常, 或版本与 lib/versions.sh 不符)"; }
   gzip -dc "$t/mihomo.gz" > "$t/mihomo"
   install -m755 "$t/mihomo" /usr/local/bin/mihomo

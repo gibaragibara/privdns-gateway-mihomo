@@ -15,6 +15,22 @@ assert spec.loader is not None
 spec.loader.exec_module(adblock)
 
 
+class LegacyMitmLog:
+    def __init__(self):
+        self.warnings = []
+
+    def warn(self, message):
+        self.warnings.append(message)
+
+
+legacy_log = LegacyMitmLog()
+original_ctx = adblock.MITM_CTX
+adblock.MITM_CTX = type("Context", (), {"log": legacy_log})()
+adblock._log("warning", "bad response: %s", "not json")
+assert legacy_log.warnings == ["bad response: not json"]
+adblock.MITM_CTX = original_ctx
+
+
 class Request:
     def __init__(self, host="api.example.com", path="/ad"):
         self.pretty_host = host
@@ -58,14 +74,16 @@ with tempfile.TemporaryDirectory() as td:
     rules = root / "rules.json"
     state.write_text(json.dumps({"enabled": True}), encoding="utf-8")
     rules.write_text(json.dumps({
-        "hosts": ["api.example.com"],
+        "hosts": ["api.example.com", "other.example.com"],
         "rules": [
             {"pattern": r"^https://api\.example\.com/ad", "action": "reject-dict",
-             "arguments": {}, "source": "test"},
+             "arguments": {}, "source": "test", "hosts": ["api.example.com"]},
             {"pattern": r"^https://api\.example\.com/config", "action": "response-body-json-del",
-             "arguments": {"values": ["data.ad"]}, "source": "test"},
+             "arguments": {"values": ["data.ad"]}, "source": "test",
+             "hosts": ["api.example.com"]},
             {"pattern": r"^https://api\.example\.com/config", "action": "response-body-json-replace",
-             "arguments": {"pairs": [["data.enabled", False]]}, "source": "test"},
+             "arguments": {"pairs": [["data.enabled", False]]}, "source": "test",
+             "hosts": ["api.example.com"]},
         ],
     }), encoding="utf-8")
     addon = adblock.AdblockAddon(str(state), str(rules), response_factory)
@@ -75,6 +93,10 @@ with tempfile.TemporaryDirectory() as td:
     assert blocked.response.status_code == 200
     assert blocked.response.content == b"{}"
     assert blocked.response.headers["content-type"] == "application/json"
+    assert len(addon.rules.request_rules["api.example.com"]) == 1
+    assert len(addon.rules.response_rules["api.example.com"]) == 2
+    assert "other.example.com" not in addon.rules.request_rules
+    assert addon.rules.request_fallback == []
 
     unrelated = Flow("other.example.com", "/ad")
     addon.request(unrelated)

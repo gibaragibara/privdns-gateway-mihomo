@@ -22,7 +22,7 @@ jobs:
       - name: Shell 语法 (bash -n)
         run: |
           bash -n install.sh uninstall.sh \
-            deploy/bot/*.sh deploy/cert/*.sh lib/*.sh
+            deploy/bot/*.sh deploy/cert/*.sh deploy/mihomo/*.sh lib/*.sh
 
       - name: JSON 模板渲染后可解析
         run: |
@@ -77,7 +77,8 @@ jobs:
         run: |
           command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
           shellcheck --severity=warning -e SC1091 \
-            install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh tests/*.sh
+            install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh \
+            deploy/mihomo/*.sh lib/*.sh tests/*.sh
 
       - name: "防火墙迁移识别回归 (原装应迁移 / 自定义应跳过)"
         run: bash tests/test-fw-migration.sh

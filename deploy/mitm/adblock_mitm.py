@@ -34,7 +34,13 @@ LOG = logging.getLogger("pdg-adblock")
 def _log(level, message, *args):
     rendered = message % args if args else message
     if MITM_CTX is not None:
-        getattr(MITM_CTX.log, level)(rendered)
+        method = getattr(MITM_CTX.log, level, None)
+        if method is None and level == "warning":
+            method = getattr(MITM_CTX.log, "warn", None)
+        if callable(method):
+            method(rendered)
+            return
+        LOG.log(getattr(logging, level.upper(), logging.INFO), rendered)
     else:
         getattr(LOG, level)(rendered)
 
@@ -149,8 +155,18 @@ class RuleCache:
         self.path = path
         self.stamp = object()
         self.hosts = set()
-        self.request_rules = []
-        self.response_rules = []
+        self.request_rules = {}
+        self.response_rules = {}
+        self.request_fallback = []
+        self.response_fallback = []
+
+    def request_candidates(self, host):
+        yield from self.request_rules.get(str(host).lower(), ())
+        yield from self.request_fallback
+
+    def response_candidates(self, host):
+        yield from self.response_rules.get(str(host).lower(), ())
+        yield from self.response_fallback
 
     def refresh(self):
         current = _stamp(self.path)
@@ -158,8 +174,10 @@ class RuleCache:
             return
         self.stamp = current
         hosts = set()
-        request_rules = []
-        response_rules = []
+        request_rules = {}
+        response_rules = {}
+        request_fallback = []
+        response_fallback = []
         if current is not None:
             try:
                 with open(self.path, encoding="utf-8") as file:
@@ -177,15 +195,29 @@ class RuleCache:
                         continue
                     rule = dict(raw)
                     rule["compiled"] = compiled
-                    target = request_rules if rule["action"] in REQUEST_ACTIONS else response_rules
-                    target.append(rule)
+                    is_request = rule["action"] in REQUEST_ACTIONS
+                    target = request_rules if is_request else response_rules
+                    fallback = request_fallback if is_request else response_fallback
+                    rule_hosts = raw.get("hosts")
+                    if isinstance(rule_hosts, list):
+                        for host in {str(value).lower() for value in rule_hosts
+                                     if isinstance(value, str)} & hosts:
+                            target.setdefault(host, []).append(rule)
+                    else:
+                        # Version 1 caches had no per-rule host index. Retain
+                        # compatibility until the next scheduled compilation.
+                        fallback.append(rule)
             except (OSError, AttributeError, json.JSONDecodeError) as exc:
                 _log("warning", "adblock rules unavailable: %s", exc)
         self.hosts = hosts
         self.request_rules = request_rules
         self.response_rules = response_rules
+        self.request_fallback = request_fallback
+        self.response_fallback = response_fallback
+        request_count = sum(map(len, request_rules.values())) + len(request_fallback)
+        response_count = sum(map(len, response_rules.values())) + len(response_fallback)
         _log("info", "adblock rules loaded hosts=%s request=%s response=%s",
-             len(hosts), len(request_rules), len(response_rules))
+             len(hosts), request_count, response_count)
 
 
 class AdblockAddon:
@@ -242,7 +274,8 @@ class AdblockAddon:
         if not self._active(flow):
             return
         url = self._url(flow)
-        for rule in self.rules.request_rules:
+        host = str(getattr(flow.request, "pretty_host", "")).lower()
+        for rule in self.rules.request_candidates(host):
             if not rule["compiled"].search(url):
                 continue
             synthetic = self._synthetic(rule)
@@ -257,7 +290,9 @@ class AdblockAddon:
         if flow.response is None or not self._active(flow):
             return
         url = self._url(flow)
-        matches = [rule for rule in self.rules.response_rules if rule["compiled"].search(url)]
+        host = str(getattr(flow.request, "pretty_host", "")).lower()
+        matches = [rule for rule in self.rules.response_candidates(host)
+                   if rule["compiled"].search(url)]
         if not matches:
             return
         body = _response_body(flow.response)

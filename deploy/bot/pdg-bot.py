@@ -283,7 +283,7 @@ def _adblock_hosts():
                                    str(host).strip().lower())})
 
 def _adblock_source_config(strict=False):
-    empty = {"sources": [], "domain_sources": [],
+    empty = {"sources": [], "domain_sources": [], "local_domain_rules": [],
              "mitm_exclude_hosts": [], "compatibility_routes": []}
     try:
         with open(ADBLOCK_SOURCES, encoding="utf-8") as file:
@@ -298,7 +298,8 @@ def _adblock_source_config(strict=False):
         if strict:
             raise ValueError("去广告来源配置不是 JSON 对象，已拒绝覆盖；请先恢复配置")
         return empty
-    for key in ("sources", "domain_sources", "mitm_exclude_hosts", "compatibility_routes"):
+    for key in ("sources", "domain_sources", "local_domain_rules",
+                "mitm_exclude_hosts", "compatibility_routes"):
         if key not in config:
             config[key] = []
         elif not isinstance(config[key], list):

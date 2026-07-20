@@ -1,0 +1,57 @@
+name: Build patched mihomo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: Build and test pinned source
+        run: |
+          source lib/versions.sh
+          output="mihomo-linux-${{ matrix.arch }}-v${MIHOMO_VER}-${MIHOMO_PATCH_VER}"
+          ./deploy/mihomo/build-patched.sh "${{ matrix.arch }}" "$output"
+          gzip -n -9 "$output"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-${{ matrix.arch }}
+          path: mihomo-linux-*.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mihomo-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify and publish pinned assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source lib/versions.sh
+          pdg_verify_sha256 "release-assets/mihomo-linux-amd64-v${MIHOMO_VER}-${MIHOMO_PATCH_VER}.gz" \
+            "$(pdg_sha256 mihomo-amd64)" "patched mihomo amd64"
+          pdg_verify_sha256 "release-assets/mihomo-linux-arm64-v${MIHOMO_VER}-${MIHOMO_PATCH_VER}.gz" \
+            "$(pdg_sha256 mihomo-arm64)" "patched mihomo arm64"
+          if ! gh release view "$MIHOMO_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$MIHOMO_RELEASE_TAG" --target "$GITHUB_SHA" \
+              --title "Mihomo v${MIHOMO_VER}-${MIHOMO_PATCH_VER}" \
+              --notes "Pinned Mihomo build with the parse-pure-ip sniff-cache fix."
+          fi
+          gh release upload "$MIHOMO_RELEASE_TAG" release-assets/*.gz --clobber

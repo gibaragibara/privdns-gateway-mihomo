@@ -37,7 +37,13 @@ class WlocFormatError(ValueError):
 def _log(level, message, *args):
     rendered = message % args if args else message
     if MITM_CTX is not None:
-        getattr(MITM_CTX.log, level)(rendered)
+        method = getattr(MITM_CTX.log, level, None)
+        if method is None and level == "warning":
+            method = getattr(MITM_CTX.log, "warn", None)
+        if callable(method):
+            method(rendered)
+            return
+        LOG.log(getattr(logging, level.upper(), logging.INFO), rendered)
     else:
         getattr(LOG, level)(rendered)
 

@@ -114,7 +114,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 | 层 | 用什么 | 说明 |
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853 公网)。WhatsApp 等无 SNI 域名返回真实 IP(配合 TPROXY) |
-| 流量 | **mihomo 1.19** | `tproxy-port: 7893` + sniffer;多出口 url-test 故障切换;external-controller 测速/流量 |
+| 流量 | **mihomo 1.19.27-pdg1** | `tproxy-port: 7893` + sniffer；补丁构建避免共享网关 IP 的嗅探失败缓存污染；多出口 url-test 故障切换 |
 | 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/WLOC/去广告/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
 | 共享 MITM(可选) | **mitmproxy sidecar** | WLOC/去广告按功能独立启停并复用同一 CA；只监听本机 `:9080`，两项都关闭才停止 |
 | 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |

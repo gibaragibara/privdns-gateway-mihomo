@@ -13,11 +13,11 @@ case "$(uname -m)" in
   *) fail "不支持的架构: $(uname -m)" ;;
 esac
 
-if command -v mihomo >/dev/null && { [[ "$(uname -s)" != "Linux" ]] || mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}"; }; then
+if command -v mihomo >/dev/null && { [[ "$(uname -s)" != "Linux" ]] || mihomo -v 2>/dev/null | grep -q "v${MIHOMO_VER}-${MIHOMO_PATCH_VER}"; }; then
   MIHOMO="$(command -v mihomo)"
 else
   echo "[*] 下载锁定版 mihomo $MIHOMO_VER ($ARCH)…"
-  curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VER}/mihomo-linux-${ARCH}-v${MIHOMO_VER}.gz" \
+  curl -fsSL "$(pdg_mihomo_url "$ARCH")" \
        -o "$WORK/mihomo.gz" || fail "mihomo 下载失败"
   pdg_verify_sha256 "$WORK/mihomo.gz" "$(pdg_sha256 "mihomo-$ARCH")" "mihomo $MIHOMO_VER ($ARCH)" \
     || fail "mihomo SHA256 校验失败"
