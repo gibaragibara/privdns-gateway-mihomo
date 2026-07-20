@@ -241,9 +241,9 @@ with tempfile.TemporaryDirectory() as td:
     assert combined["rules"][:5] == [
         "DOMAIN,api.example.com,residential",
         "DOMAIN-SUFFIX,cdn.example.com,residential",
+        f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
         f"RULE-SET,{bot.ADBLOCK_DOMAIN_PROVIDER},REJECT",
         f"RULE-SET,{bot.ADBLOCK_CLASSICAL_PROVIDER},REJECT",
-        f"DOMAIN,ads.example.com,{bot.WLOC_OUTBOUND}",
     ]
 
     Path(bot.ADBLOCK_RULES).write_text(json.dumps({

@@ -988,11 +988,14 @@ def _mihomo_config(c):
             rules.append(f"DOMAIN-KEYWORD,{k},{target}")
         for cidr in r.get("ip_cidr", []):
             rules.append(f"IP-CIDR,{cidr},{target},no-resolve")
+    # A supported path rewrite is more specific than a broad domain denylist.
+    # Keep exact MITM hosts first so a synthetic no-ad response can clear SDK
+    # state instead of a connection-level reject leaving cached creatives alive.
+    rules.extend(f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts))
     if domain_rule_count and domain_mrs_rule_count:
         rules.append(f"RULE-SET,{ADBLOCK_DOMAIN_PROVIDER},REJECT")
     if domain_rule_count and domain_classical_rule_count:
         rules.append(f"RULE-SET,{ADBLOCK_CLASSICAL_PROVIDER},REJECT")
-    rules.extend(f"DOMAIN,{host},{WLOC_OUTBOUND}" for host in dict.fromkeys(mitm_hosts))
     for r in c.get("route", {}).get("rules", []):
         if r.get("force_gateway"):
             continue
