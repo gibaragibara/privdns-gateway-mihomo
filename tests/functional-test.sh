@@ -51,7 +51,7 @@ for port in 19081 19082; do
   [[ "$ready" == 1 ]] || fail "mock SOCKS :$port 未就绪"
 done
 
-printf '%s\n' '.blocked.example' '*.wildblocked.example' > "$WORK/adblock-domain.txt"
+printf '%s\n' '+.blocked.example' '*.wildblocked.example' > "$WORK/adblock-domain.txt"
 "$MIHOMO" convert-ruleset domain text \
   "$WORK/adblock-domain.txt" "$WORK/adblock-domain.mrs" \
   || fail "MRS 规则转换失败"
@@ -118,6 +118,7 @@ PY
 
 connect_host foo.ai.example
 connect_host cdn.media.example
+connect_host blocked.example
 connect_host ads.blocked.example
 connect_host cdn.wildblocked.example
 connect_host cdn.blocked-keyword.example

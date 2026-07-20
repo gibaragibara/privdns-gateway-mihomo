@@ -615,7 +615,11 @@ def split_domain_rules(rules):
         if kind == "DOMAIN":
             converted = value
         elif kind == "DOMAIN-SUFFIX":
-            converted = "." + value
+            # Mihomo's domain text format uses "+." for suffix semantics that
+            # include both the apex and its subdomains. A leading dot only
+            # matches subdomains and silently misses a suffix rule when an app
+            # calls the apex itself.
+            converted = "+." + value
         elif kind == "DOMAIN-WILDCARD":
             converted = value
         else:

@@ -240,7 +240,7 @@ assert compiled_domains["stats"] == {
 }
 domain_rules, classical_rules = sync.split_domain_rules(compiled_domains["rules"])
 assert domain_rules == [
-    ".ads.example.com", "exact.example.net", "api.ads.example.com",
+    "+.ads.example.com", "exact.example.net", "api.ads.example.com",
     "api-noresolve.example.com",
 ]
 assert classical_rules == [
@@ -248,8 +248,8 @@ assert classical_rules == [
 ]
 auto_domains, auto_classical = sync.split_domain_rules(parsed_auto["rules"])
 assert auto_domains == [
-    ".suffix.auto.example", "exact.auto.example", "commented.auto.example",
-    ".tracker.auto.example", "*.wild.auto.example",
+    "+.suffix.auto.example", "exact.auto.example", "commented.auto.example",
+    "+.tracker.auto.example", "*.wild.auto.example",
 ]
 assert auto_classical == ["DOMAIN-KEYWORD,ad-token"]
 
