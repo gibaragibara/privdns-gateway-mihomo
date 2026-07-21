@@ -116,11 +116,15 @@ migrate_firewall_to_pdg(){
   grep -q 'table inet pdg' "$f" && ! grep -q 'table inet filter' "$f" && return 0
   # 必须看起来像本项目的防火墙(含我们放行的端口特征), 否则不乱动用户的自定义规则
   grep -qE '\b(853|8445)\b' "$f" || return 0
-  local port cidr tmp; tmp="$(mktemp)"
+  local port cidr server_ip tmp; tmp="$(mktemp)"
   port=$(grep -E 'tcp dport.*accept' "$f" | grep -v saddr | grep -oE '[0-9]+' | head -1)
   cidr=$(grep -oE 'ip saddr [0-9./]+' "$f" | head -1 | awk '{print $3}')
-  if [[ -z "$port" || -z "$cidr" ]]; then
-    c_y "检测到旧防火墙但解析不出 SSH端口/内网段, 跳过自动迁移(可手动重渲染)。"; rm -f "$tmp"; return 0
+  server_ip=$(jq -r '.server_ip // empty' /etc/mihomo/state.json 2>/dev/null)
+  [[ "$server_ip" =~ ^[0-9]+([.][0-9]+){3}$ ]] \
+    || server_ip=$(grep -oE '"[0-9.]+/32"' /etc/mihomo/state.json 2>/dev/null \
+         | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  if [[ -z "$port" || -z "$cidr" || -z "$server_ip" ]]; then
+    c_y "检测到旧防火墙但解析不出 SSH端口/内网段/服务器IP, 跳过自动迁移(可手动重渲染)。"; rm -f "$tmp"; return 0
   fi
   # 迁移=用标准模板重建, 只保留 SSH端口+内网段; 若旧配置里有自定义端口/规则/额外表,
   # 重建会静默丢掉它们 → 检测到非原装就不自动迁移, 让用户手动并入(旧配置原样留在 $f)。
@@ -134,6 +138,7 @@ migrate_firewall_to_pdg(){
   fi
   c_g "检测到旧版(原装)防火墙 → 迁移到独立表 inet pdg (SSH=$port, 内网段=$cidr)…"
   sed -e "s/__SSH_PORT__/$port/g" -e "s#__INTERNAL_CIDR__#$cidr#g" \
+      -e "s/__SERVER_IP__/$server_ip/g" \
       "$REPO_DIR/deploy/firewall/nftables.conf" > "$tmp"
   if ! nft -c -f "$tmp" >/dev/null 2>&1; then
     c_y "  新规则 nft -c 校验未过, 保留旧防火墙不动。"; rm -f "$tmp"; return 0
@@ -156,6 +161,56 @@ migrate_firewall_to_pdg(){
   else
     cp -a "$bak" "$f" 2>/dev/null                       # 还原 on-disk 配置=旧(内核里旧表仍在)
     c_y "  ⚠️ 新规则加载失败 → 保留旧防火墙、未删 inet filter、配置已还原(防火墙未中断)。"
+  fi
+}
+
+# 已经使用 inet pdg 的旧安装可能缺少本机 :81/:8445 的 prerouting 豁免。
+# 只在标准 TPROXY 行前插入一条精确 daddr 规则，不改写其它自定义防火墙内容。
+migrate_fw_local_service_bypass(){
+  local f=/etc/nftables.conf cidr server_ip tmp bak
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0
+  grep -q 'tproxy ip to 127.0.0.1:7893' "$f" || return 0
+  if awk '
+    /chain prerouting[[:space:]]*[{]/ { inside=1 }
+    inside && /accept/ && /dport/ {
+      if ($0 ~ /(^|[^0-9])81([^0-9]|$)/) p81=1
+      if ($0 ~ /(^|[^0-9])8445([^0-9]|$)/) p8445=1
+    }
+    inside && /^[[:space:]]*[}][[:space:]]*$/ { inside=0 }
+    END { exit !(p81 && p8445) }
+  ' "$f"; then
+    return 0
+  fi
+  cidr=$(grep -oE 'ip saddr [0-9./]+' "$f" | head -1 | awk '{print $3}')
+  server_ip=$(jq -r '.server_ip // empty' /etc/mihomo/state.json 2>/dev/null)
+  [[ "$server_ip" =~ ^[0-9]+([.][0-9]+){3}$ ]] \
+    || server_ip=$(grep -oE '"[0-9.]+/32"' /etc/mihomo/state.json 2>/dev/null \
+         | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  if [[ -z "$cidr" || -z "$server_ip" ]]; then
+    c_y "无法补 :81/:8445 防火墙豁免: 内网段或服务器 IP 缺失。"
+    return 0
+  fi
+  tmp=$(mktemp); bak="$f.pre-local-bypass.$(date +%s)"
+  if ! awk -v rule="        ip saddr $cidr ip daddr $server_ip tcp dport { 81, 8445 } accept" '
+      !done && /tproxy ip to 127[.]0[.]0[.]1:7893/ { print rule; done=1 }
+      { print }
+      END { if (!done) exit 1 }
+    ' "$f" > "$tmp" || ! nft -c -f "$tmp" >/dev/null 2>&1; then
+    c_y "补 :81/:8445 防火墙豁免失败，保留原配置。"; rm -f "$tmp"; return 0
+  fi
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak" \
+      || ! cp "$tmp" "$f" 2>/dev/null || ! cmp -s "$tmp" "$f"; then
+    cp -a "$bak" "$f" 2>/dev/null || true
+    c_y "写入 :81/:8445 防火墙豁免失败，已保留原配置。"; rm -f "$tmp"; return 0
+  fi
+  rm -f "$tmp"
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ 已补本机 :81/:8445 的 TPROXY 前置豁免。"
+  else
+    cp -a "$bak" "$f" 2>/dev/null || true
+    nft -f "$f" 2>/dev/null || true
+    c_y "应用 :81/:8445 防火墙豁免失败，已回滚。"
   fi
 }
 
@@ -467,6 +522,10 @@ cmd_update(){
       --merge-defaults "$REPO_DIR"/deploy/mitm/adblock-sources.json --merge-only; then
     c_y "去广告规则源迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
+  if ! python3 /opt/pdg-bot/sync_adblock.py \
+      --sources /etc/privdns-gateway/adblock-sources.json --pin-missing-modules; then
+    c_y "现有 MITM 插件初始 SHA256 固定失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
   install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service    /etc/systemd/system/
   if ! python3 /opt/pdg-bot/migrate_wloc.py /etc/mosdns/config.yaml; then
     c_y "mosdns 共享 MITM 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
@@ -486,6 +545,7 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
+  migrate_fw_local_service_bypass # 老装: 本机探测/Telegram 入口不能被 TPROXY 截走
   migrate_fw_android_dot_gms  # 老装: 853 公网 DoT(安卓 Wi-Fi) + GMS 5228-5230
   migrate_mosdns_whatsapp     # 老装: WhatsApp 无 SNI 返回真实 IP
 

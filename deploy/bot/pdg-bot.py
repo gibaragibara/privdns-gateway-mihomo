@@ -53,34 +53,36 @@ ADBLOCK_SOURCE_LIMIT = 64
 ADBLOCK_PRIVATE_RESOURCE_LIMIT = 128
 ADBLOCK_FETCH_WORKERS = 4
 ADBLOCK_COMPATIBILITY_LIMIT = 256
-MITM_LOCK_FILE = "/run/lock/pdg-mitm.lock"
+CONFIG_LOCK_FILE = "/run/privdns-gateway.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
-_MITM_CONFIG_THREAD_LOCK = threading.RLock()
-_MITM_CONFIG_LOCAL = threading.local()
+_CONFIG_THREAD_LOCK = threading.RLock()
+_CONFIG_LOCAL = threading.local()
+_TELEGRAM_LOCAL = threading.local()
 
-# ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
-_conn = None
+# ── Telegram (每个 worker 复用自己的 HTTPS 长连接) ──
 
 def post(method, params):
-    global _conn
     body = json.dumps(params).encode()
     path = "/bot" + TOKEN + "/" + method
     hdr = {"Content-Type": "application/json", "Connection": "keep-alive"}
     for attempt in (0, 1):                       # 连接断了就重连重试一次
         try:
-            if _conn is None:
-                _conn = http.client.HTTPSConnection("api.telegram.org", timeout=70)
-            _conn.request("POST", path, body, hdr)
-            data = _conn.getresponse().read()
+            conn = getattr(_TELEGRAM_LOCAL, "connection", None)
+            if conn is None:
+                conn = http.client.HTTPSConnection("api.telegram.org", timeout=70)
+                _TELEGRAM_LOCAL.connection = conn
+            conn.request("POST", path, body, hdr)
+            data = conn.getresponse().read()
             return json.loads(data) if data else {}
         except Exception as e:  # noqa: BLE001
             try:
-                if _conn:
-                    _conn.close()
+                conn = getattr(_TELEGRAM_LOCAL, "connection", None)
+                if conn:
+                    conn.close()
             except Exception:  # noqa: BLE001
                 pass
-            _conn = None
+            _TELEGRAM_LOCAL.connection = None
             if attempt:
                 print("api", method, e); return {}
 
@@ -411,6 +413,11 @@ def _adblock_source_id(url):
 
 def _adblock_module_sources(config=None):
     config = config or _adblock_source_config()
+    pending_by_url = {
+        str(item.get("url") or ""): item
+        for item in _adblock_rules().get("pending_updates", [])
+        if isinstance(item, dict) and item.get("url")
+    }
     result = []
     for item in config.get("sources", []):
         if not isinstance(item, dict) or not item.get("enabled", True):
@@ -418,8 +425,13 @@ def _adblock_module_sources(config=None):
         url = str(item.get("url") or "").strip()
         if not url:
             continue
-        result.append({"id": _adblock_source_id(url), "name": str(item.get("name") or url)[:80],
-                       "url": url})
+        result.append({
+            "id": _adblock_source_id(url),
+            "name": str(item.get("name") or url)[:80],
+            "url": url,
+            "sha256": str(item.get("sha256") or ""),
+            "pending": pending_by_url.get(url),
+        })
     return result
 
 
@@ -494,28 +506,32 @@ def _mitm_active():
     return _wloc_active() or (_adblock_active() and bool(_adblock_hosts()))
 
 @contextlib.contextmanager
-def _mitm_config_lock():
-    with _MITM_CONFIG_THREAD_LOCK:
-        depth = getattr(_MITM_CONFIG_LOCAL, "depth", 0)
+def _config_lock():
+    """Serialize every configuration mutation with the pdg CLI lock."""
+    with _CONFIG_THREAD_LOCK:
+        depth = getattr(_CONFIG_LOCAL, "depth", 0)
         if depth == 0:
-            os.makedirs(os.path.dirname(MITM_LOCK_FILE), mode=0o755, exist_ok=True)
-            descriptor = os.open(MITM_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+            os.makedirs(os.path.dirname(CONFIG_LOCK_FILE), mode=0o755, exist_ok=True)
+            descriptor = os.open(CONFIG_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
             except Exception:
                 os.close(descriptor)
                 raise
-            _MITM_CONFIG_LOCAL.descriptor = descriptor
-        _MITM_CONFIG_LOCAL.depth = depth + 1
+            _CONFIG_LOCAL.descriptor = descriptor
+        _CONFIG_LOCAL.depth = depth + 1
         try:
             yield
         finally:
-            _MITM_CONFIG_LOCAL.depth -= 1
-            if _MITM_CONFIG_LOCAL.depth == 0:
-                descriptor = _MITM_CONFIG_LOCAL.descriptor
+            _CONFIG_LOCAL.depth -= 1
+            if _CONFIG_LOCAL.depth == 0:
+                descriptor = _CONFIG_LOCAL.descriptor
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
-                del _MITM_CONFIG_LOCAL.descriptor
+                del _CONFIG_LOCAL.descriptor
+
+
+_mitm_config_lock = _config_lock
 
 def _nav(key):
     """二级子菜单 (标题, 键盘)。每个子菜单末尾自带「返回主菜单」。"""
@@ -594,6 +610,8 @@ def _adblock_page():
     imported_jq = int(stats.get("imported_external_jq", 0) or 0)
     jq_pins = int(stats.get("external_jq_pins", 0) or 0)
     stale_resources = int(stats.get("stale_pinned_resources", 0) or 0)
+    pending_modules = int(stats.get("pending_module_updates", 0) or 0)
+    unreachable = int(stats.get("unreachable_rewrites", 0) or 0)
     text = ("🛡 <b>服务端去广告</b>\n"
             "普通 REJECT 规则由 mihomo 直接拦截；响应改写复用共享 CA。\n\n"
             f"状态: <b>{'已开启' if enabled else '已关闭'}</b>\n"
@@ -609,9 +627,10 @@ def _adblock_page():
             f"剩余: {unported_scripts}\n"
             f"外部 jq: {imported_jq}/{jq_pins}  "
             f"未支持重写: {int(stats.get('unsupported_rewrites', 0) or 0)}\n"
+            f"不可达重写: {unreachable}  待批准模块: {pending_modules}\n"
             f"固定资源失效: {stale_resources}\n"
             f"最近同步: <code>{_esc(generated)}</code>\n\n"
-            "自动更新: 每日 04:30（含普通 REJECT 与 MITM 插件）\n\n"
+            "自动更新: 每日 04:30；MITM 内容变化需在插件页批准\n\n"
             "MITM 只执行已固定哈希的安全转换；不会直接执行远程 JavaScript。")
     rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
     rows.append([
@@ -629,13 +648,21 @@ def _adblock_page():
 
 def _adblock_sources_page():
     sources = _adblock_module_sources()
+    pending_count = sum(bool(source.get("pending")) for source in sources)
     text = ("🧩 <b>MITM 插件管理</b>\n"
             f"当前: <b>{len(sources)}</b> 个。删除以单个 Kelee/Loon 插件为单位；"
-            "普通 REJECT 规则不在这里删除。")
+            "普通 REJECT 规则不在这里删除。\n"
+            f"待批准更新: <b>{pending_count}</b>；批准前继续使用已固定的旧版本。")
     rows = [[{"text": "➕ 添加插件 URL", "callback_data": "adsrc_add"}]]
     for source in sources[:64]:
         label = " ".join(source["name"].split())[:42] or source["url"][:42]
-        rows.append([{"text": "🗑 " + label, "callback_data": "adsrc_del:" + source["id"]}])
+        if source.get("pending"):
+            rows.append([
+                {"text": "⬆️ " + label[:30], "callback_data": "adsrc_upd:" + source["id"]},
+                {"text": "🗑", "callback_data": "adsrc_del:" + source["id"]},
+            ])
+        else:
+            rows.append([{"text": "🗑 " + label, "callback_data": "adsrc_del:" + source["id"]}])
     rows.extend([[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
@@ -1060,17 +1087,28 @@ def _mihomo_config(c):
 def _write(c):
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     os.makedirs(RS_DIR, exist_ok=True)
-    t = STATE + ".tmp"
-    with open(t, "w") as f:
-        json.dump(c, f, ensure_ascii=False, indent=2)
-    os.chmod(t, 0o600)
-    os.replace(t, STATE)
-    y = MIHOMO_CFG + ".tmp"
-    with open(y, "w") as f:
-        f.write("# Generated by pdg-bot. Edit /etc/mihomo/state.json via bot/pdg, not this file.\n")
-        f.write(_yaml_dump(_mihomo_config(c)) + "\n")
-    os.chmod(y, 0o600)
-    os.replace(y, MIHOMO_CFG)
+    rendered = ("# Generated by pdg-bot. Edit /etc/mihomo/state.json via bot/pdg, not this file.\n"
+                + _yaml_dump(_mihomo_config(c)) + "\n")
+    staged = []
+    try:
+        for path, writer in (
+                (STATE, lambda file: json.dump(c, file, ensure_ascii=False, indent=2)),
+                (MIHOMO_CFG, lambda file: file.write(rendered))):
+            fd, temporary = tempfile.mkstemp(
+                prefix=".pdg-config-", dir=os.path.dirname(path), text=True)
+            staged.append((temporary, path))
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                writer(file)
+                if path == STATE:
+                    file.write("\n")
+                file.flush(); os.fsync(file.fileno())
+            os.chmod(temporary, 0o600)
+        for temporary, path in staged:
+            os.replace(temporary, path)
+    finally:
+        for temporary, _path in staged:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 def _svc_active(unit, need=3, delay=0.6, max_polls=15):
     """确认服务"稳定" active: 要求连续 need 次观测都是 active。
@@ -1088,25 +1126,42 @@ def _svc_active(unit, need=3, delay=0.6, max_polls=15):
     return False
 
 def apply_sb(modify):
-    shutil.copy(STATE, STATE + ".botbak"); os.chmod(STATE + ".botbak", 0o600)
-    if os.path.exists(MIHOMO_CFG):
-        shutil.copy(MIHOMO_CFG, MIHOMO_CFG + ".botbak"); os.chmod(MIHOMO_CFG + ".botbak", 0o600)
-    c = load(); modify(c); _write(c)
-    chk = sh(["mihomo", "-t", "-d", os.path.dirname(MIHOMO_CFG)])
-    if chk.returncode != 0:
-        shutil.copy(STATE + ".botbak", STATE)
-        if os.path.exists(MIHOMO_CFG + ".botbak"):
-            shutil.copy(MIHOMO_CFG + ".botbak", MIHOMO_CFG)
-        return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
-    sh(["systemctl", "reset-failed", "mihomo"])   # 清掉 start-limit 计数: 连改多条快速多次重启不会触发限速锁死
-    r = sh(["systemctl", "restart", "mihomo"])
-    if r.returncode != 0 or not _svc_active("mihomo"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
-        shutil.copy(STATE + ".botbak", STATE)
-        if os.path.exists(MIHOMO_CFG + ".botbak"):
-            shutil.copy(MIHOMO_CFG + ".botbak", MIHOMO_CFG)
-        sh(["systemctl", "reset-failed", "mihomo"]); sh(["systemctl", "restart", "mihomo"])
-        return False, "重启 mihomo 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
-    return True, ""
+    with _config_lock():
+        backup_dir = tempfile.mkdtemp(prefix=".pdg-apply-", dir=os.path.dirname(STATE))
+        state_backup = os.path.join(backup_dir, "state.json")
+        config_backup = os.path.join(backup_dir, "config.yaml")
+        had_config = os.path.exists(MIHOMO_CFG)
+
+        def restore_files():
+            shutil.copy2(state_backup, STATE)
+            if had_config:
+                shutil.copy2(config_backup, MIHOMO_CFG)
+            elif os.path.exists(MIHOMO_CFG):
+                os.unlink(MIHOMO_CFG)
+
+        try:
+            shutil.copy2(STATE, state_backup); os.chmod(state_backup, 0o600)
+            if had_config:
+                shutil.copy2(MIHOMO_CFG, config_backup); os.chmod(config_backup, 0o600)
+            try:
+                c = load(); modify(c); _write(c)
+            except Exception as exc:  # noqa: BLE001
+                restore_files()
+                return False, "配置写入失败, 已回滚: " + str(exc)[-300:]
+            chk = sh(["mihomo", "-t", "-d", os.path.dirname(MIHOMO_CFG)])
+            if chk.returncode != 0:
+                restore_files()
+                return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
+            sh(["systemctl", "reset-failed", "mihomo"])
+            r = sh(["systemctl", "restart", "mihomo"])
+            if r.returncode != 0 or not _svc_active("mihomo"):
+                restore_files()
+                sh(["systemctl", "reset-failed", "mihomo"])
+                sh(["systemctl", "restart", "mihomo"])
+                return False, "重启 mihomo 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
+            return True, ""
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 def _wloc_mosdns_ready():
     try:
@@ -1433,6 +1488,9 @@ def add_adblock_plugin(url):
     ok, detail = _adblock_check_plugin(url)
     if not ok:
         return False, detail
+    digest = str(detail.get("sha256") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return False, "插件校验器没有返回有效 SHA256"
     with _mitm_config_lock():
         try:
             config = _adblock_source_config(strict=True)
@@ -1445,17 +1503,61 @@ def add_adblock_plugin(url):
             return False, f"MITM 插件最多 {ADBLOCK_SOURCE_LIMIT} 个"
         previous = json.loads(json.dumps(config))
         config["sources"].append({
-            "name": _adblock_plugin_name(url), "url": url, "enabled": True,
+            "name": _adblock_plugin_name(url), "url": url,
+            "sha256": digest, "enabled": True,
         })
         _adblock_write_source_config(config)
         if _adblock_active():
             refreshed, message = enable_adblock()
-            if not refreshed:
-                _adblock_write_source_config(previous)
-                return False, message
-        return True, (f"✅ 已添加插件 {_adblock_plugin_name(url)}；"
+        else:
+            refreshed, message = _adblock_sync_rules()
+        if not refreshed:
+            _adblock_write_source_config(previous)
+            return False, message
+        return True, (f"✅ 已添加并固定插件 {_adblock_plugin_name(url)}；"
+                      f"SHA256 <code>{digest[:12]}</code>；"
                       f"声明式重写 {detail.get('supported_rewrites', 0)} 条，"
                       f"待匹配脚本转换 {detail.get('unported_scripts', 0)} 条")
+
+
+def approve_adblock_plugin_update(source_id):
+    with _mitm_config_lock():
+        pending = next((item for item in _adblock_rules().get("pending_updates", [])
+                        if isinstance(item, dict)
+                        and _adblock_source_id(item.get("url")) == source_id), None)
+        if not pending:
+            return False, "待批准更新不存在；请先同步规则"
+        try:
+            config = _adblock_source_config(strict=True)
+        except ValueError as exc:
+            return False, str(exc)
+        source = next((item for item in config.get("sources", [])
+                       if isinstance(item, dict)
+                       and _adblock_source_id(item.get("url")) == source_id), None)
+        if not source:
+            return False, "插件不存在或已删除"
+        url = str(source.get("url") or "")
+        ok, detail = _adblock_check_plugin(url)
+        if not ok:
+            return False, detail
+        expected = str(pending.get("sha256") or "").lower()
+        current = str(detail.get("sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", current) or current != expected:
+            return False, "远程插件在审批期间再次变化；请重新同步并检查新的差异"
+        previous = json.loads(json.dumps(config))
+        source["sha256"] = current
+        _adblock_write_source_config(config)
+        if _adblock_active():
+            refreshed, message = enable_adblock()
+        else:
+            refreshed, message = _adblock_sync_rules()
+        if not refreshed:
+            _adblock_write_source_config(previous)
+            return False, message
+        return True, (f"✅ 已批准 {_adblock_plugin_name(url)} 更新；"
+                      f"SHA256 <code>{current[:12]}</code>；"
+                      f"主机 {detail.get('host_count', 0)}，"
+                      f"重写 {detail.get('rule_count', 0)}")
 
 def delete_adblock_plugin(source_id):
     with _mitm_config_lock():
@@ -1803,9 +1905,38 @@ def _read_direct():
             if l.strip() and not l.startswith("#")]
 
 def _write_direct(domains):
-    with open(MOSDNS_DIRECT, "w") as f:
-        f.write("# pdg-bot 自定义直连\n" + "".join("domain:" + d + "\n" for d in sorted(set(domains))))
-    sh(["systemctl", "restart", "mosdns"])
+    with _config_lock():
+        directory = os.path.dirname(MOSDNS_DIRECT)
+        os.makedirs(directory, mode=0o755, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".custom-direct-", dir=directory, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write("# pdg-bot 自定义直连\n" + "".join(
+                    "domain:" + d + "\n" for d in sorted(set(domains))))
+                file.flush(); os.fsync(file.fileno())
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, MOSDNS_DIRECT)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        sh(["systemctl", "restart", "mosdns"])
+
+
+def _add_direct_domain(domain):
+    with _config_lock():
+        current = _read_direct()
+        if domain not in current:
+            _write_direct(current + [domain])
+
+
+def _remove_direct_domains(domains):
+    wanted = set(domains)
+    with _config_lock():
+        current = _read_direct()
+        removed = [domain for domain in current if domain in wanted]
+        if removed:
+            _write_direct([domain for domain in current if domain not in wanted])
+        return removed
 
 # ── mosdns DNS 上游 (remote=国际 / local=国内; 用于接 DNS 解锁等自定义解析器) ──
 def _upstreams(which):
@@ -2517,7 +2648,7 @@ def add_rule(domain, target):
     if not re.match(r"^[a-z0-9.-]+$", domain):
         return False, "域名格式不对"
     if target in ("direct", "直连"):
-        _write_direct(_read_direct() + [domain]); return True, f"已把 {domain} 设为直连"
+        _add_direct_domain(domain); return True, f"已把 {domain} 设为直连"
     c = load()
     if target not in exit_tags(c):
         return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))} 或 direct"
@@ -2548,8 +2679,8 @@ def del_rule(domain):
                                     or r.get("domain_suffix") or r.get("domain")
                                     or r.get("domain_keyword") or r.get("ip_cidr")]
         apply_sb(mod); removed.append("出口规则")
-    if domain in _read_direct():
-        _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
+    if _remove_direct_domains([domain]):
+        removed.append("直连表")
     return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
 
 def deletable_domains():
@@ -2581,9 +2712,7 @@ def del_rules_bulk(domains):
     ok, msg = apply_sb(mod)
     if not ok:
         return False, msg
-    cur = _read_direct(); hit = [x for x in cur if x in domains]
-    if hit:
-        _write_direct([x for x in cur if x not in domains])   # 直连表改 mosdns 文件(与原 del_rule 一致, 不重启 mosdns)
+    hit = _remove_direct_domains(domains)
     return True, f"✅ 已删除 {len(domains)} 个域名" + (f"(含直连 {len(hit)} 个)" if hit else "")
 
 def del_rule_kb(chat, back=RULE_BACK):
@@ -3203,6 +3332,47 @@ def handle_cb(chat, mid, data, cb_id=None):
              "支持 Surge/Clash .list、纯域名/domain-set、Clash payload YAML/JSON；"
              "添加前会自动识别并校验。二进制 .mrs/.srs 不导入。/cancel 取消。",
              ADBLOCK_BACK); return
+    if data.startswith("adsrc_upd:"):
+        source_id = data.split(":", 1)[1]
+        source = next((item for item in _adblock_module_sources()
+                       if item["id"] == source_id), None)
+        pending = source.get("pending") if source else None
+        if not source or not pending:
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, "待批准更新不存在；请先同步规则。\n\n" + title, kb); return
+        added = pending.get("added_hosts", [])
+        removed = pending.get("removed_hosts", [])
+        host_diff = (f"主机: {pending.get('current_host_count', '?')} → "
+                     f"{pending.get('new_host_count', '?')}；"
+                     f"新增 {len(added)} / 删除 {len(removed)}\n")
+        samples = ""
+        if added:
+            samples += "新增示例: <code>" + _esc(", ".join(added[:6])) + "</code>\n"
+        if removed:
+            samples += "删除示例: <code>" + _esc(", ".join(removed[:6])) + "</code>\n"
+        candidate_error = pending.get("candidate_error")
+        error_text = ("⚠️ 新版本解析失败: <code>" + _esc(candidate_error) + "</code>\n"
+                      if candidate_error else "")
+        edit(chat, mid,
+             f"确认批准 <b>{_esc(source['name'])}</b> 的远程内容变化？\n"
+             f"SHA: <code>{_esc(str(pending.get('approved_sha256', ''))[:12])}</code> → "
+             f"<code>{_esc(str(pending.get('sha256', ''))[:12])}</code>\n"
+             + host_diff
+             + f"重写: {pending.get('current_rule_count', '?')} → "
+               f"{pending.get('new_rule_count', '?')}\n"
+             + samples + error_text
+             + "批准时会重新下载并核对完整 SHA；不一致则拒绝。",
+             {"inline_keyboard": [
+                 [{"text": "批准并应用", "callback_data": "adsrc_upd_yes:" + source_id}],
+                 [{"text": "取消", "callback_data": "adblock_sources"}]]}); return
+    if data.startswith("adsrc_upd_yes:"):
+        source_id = data.split(":", 1)[1]
+        edit(chat, mid, "正在重新校验并应用插件更新…", ADBLOCK_BACK)
+        def _adsrc_approve(sid=source_id):
+            ok, msg = approve_adblock_plugin_update(sid)
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
+        run_bg(_adsrc_approve); return
     if data.startswith("adsrc_del:"):
         source_id = data.split(":", 1)[1]
         source = next((item for item in _adblock_module_sources()

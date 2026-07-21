@@ -44,7 +44,9 @@ assert parsed["rules"][1]["arguments"]["pairs"] == [
 assert parsed["rules"][3]["arguments"]["body"] == '{"ok":true}'
 assert all(rule["hosts"] == ["api.example.com"] for rule in parsed["rules"])
 assert parsed["stats"] == {
+    "parsed_rewrites": 4,
     "supported_rewrites": 4,
+    "unreachable_rewrites": 0,
     "converted_script_rules": 0,
     "unsupported_rewrites": 1,
     "unsupported_actions": {"response-body-json-jq": 1},
@@ -52,7 +54,10 @@ assert parsed["stats"] == {
     "converted_scripts": 0,
     "unported_scripts": 1,
     "imported_external_jq": 0,
-    "skipped_hosts": 1,
+    "skipped_hosts": 0,
+    "declared_exact_hosts": 1,
+    "declared_wildcard_hosts": 1,
+    "excluded_module_hosts": 0,
     "unused_hosts": 0,
 }
 
@@ -69,6 +74,21 @@ assert grouped["hosts"] == ["api.example.com", "app.example.com"]
 assert grouped["rules"][0]["hosts"] == ["api.example.com", "app.example.com"]
 assert grouped["stats"]["unused_hosts"] == 1
 assert grouped["stats"]["unported_scripts"] == 1
+
+WILDCARD_MODULE = r'''
+[Rewrite]
+^https:\/\/m5\.amap\.com\/feed reject-dict
+^https:\/\/(?:api|info)\.amap\.com\/config reject-dict
+^https:\/\/ads\.amap\.com\/blocked reject-dict
+[MitM]
+hostname=*.amap.com, -ads.amap.com
+'''
+wildcard = sync.parse_module(WILDCARD_MODULE, "wildcard")
+assert wildcard["hosts"] == ["api.amap.com", "info.amap.com", "m5.amap.com"]
+assert len(wildcard["rules"]) == 2
+assert wildcard["stats"]["unreachable_rewrites"] == 1
+assert wildcard["stats"]["declared_wildcard_hosts"] == 1
+assert wildcard["stats"]["excluded_module_hosts"] == 1
 
 config = {"sources": [
     {"name": "one", "url": "https://example.com/one", "enabled": True},
@@ -178,7 +198,8 @@ assert excluded["hosts"] == []
 assert excluded["excluded_hosts"] == ["api.example.com"]
 assert excluded["stats"]["declared_host_count"] == 1
 assert excluded["stats"]["excluded_host_count"] == 1
-assert excluded["stats"]["rule_count"] == 4
+assert excluded["stats"]["rule_count"] == 0
+assert excluded["stats"]["excluded_rewrites"] == 4
 
 for invalid_exclusions in ("api.example.com", ["*.example.com"], [123]):
     try:
@@ -467,6 +488,56 @@ with tempfile.TemporaryDirectory() as td:
         ],
     }
     assert not sync.merge_source_defaults(str(current), str(defaults))
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    cache = root / "modules"
+    source_path = root / "sources.json"
+    source_path.write_text(json.dumps({
+        "sources": [{"name": "one", "url": "https://example.com/one"}],
+    }), encoding="utf-8")
+    assert sync.pin_missing_modules(
+        str(source_path), fetcher=lambda _url: MODULE, cache_dir=str(cache)) == 1
+    pinned_config = json.loads(source_path.read_text(encoding="utf-8"))
+    approved = hashlib.sha256(MODULE.encode()).hexdigest()
+    assert pinned_config["sources"][0]["sha256"] == approved
+    cached_files = list(cache.glob("*.lpx"))
+    assert len(cached_files) == 1
+    assert os.stat(cached_files[0]).st_mode & 0o777 == 0o600
+
+    first = sync.compile_sources(
+        pinned_config, fetcher=lambda _url: MODULE,
+        module_cache_dir=str(cache), require_module_pins=True)
+    assert first["stats"]["pending_module_updates"] == 0
+    changed_module = MODULE.replace(r"\/ad reject-dict", r"\/new-ad reject-dict")
+    pending = sync.compile_sources(
+        pinned_config, fetcher=lambda _url: changed_module,
+        module_cache_dir=str(cache), require_module_pins=True)
+    assert pending["stats"]["pending_module_updates"] == 1
+    assert pending["rules"] == first["rules"], "unapproved module must keep last-known-good rules"
+    assert pending["pending_updates"][0]["approved_sha256"] == approved
+    assert pending["pending_updates"][0]["sha256"] == hashlib.sha256(
+        changed_module.encode()).hexdigest()
+
+    missing_cache = sync.compile_sources(
+        pinned_config, fetcher=lambda _url: changed_module,
+        module_cache_dir=str(root / "missing-cache"), require_module_pins=True)
+    assert missing_cache["stats"]["failed_sources"] == 1
+    assert "last-known-good cache is missing" in missing_cache["failures"][0]["error"]
+
+    cached = sync.compile_sources(
+        pinned_config,
+        fetcher=lambda _url: (_ for _ in ()).throw(RuntimeError("offline")),
+        module_cache_dir=str(cache), require_module_pins=True)
+    assert cached["stats"]["cached_module_sources"] == 1
+    assert cached["rules"] == first["rules"]
+
+    unpinned = sync.compile_sources(
+        {"sources": [{"url": "https://example.com/unapproved"}]},
+        fetcher=lambda _url: MODULE, module_cache_dir=str(cache),
+        require_module_pins=True)
+    assert unpinned["stats"]["source_count"] == 0
+    assert "not approved" in unpinned["failures"][0]["error"]
 
 try:
     sync.parse_action("response-body-json-jq", "'env'")

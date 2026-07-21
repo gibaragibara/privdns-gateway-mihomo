@@ -104,6 +104,9 @@ jobs:
           python3 tests/test-wloc-migration.py
           python3 tests/test-wloc-checks.py
           python3 tests/test-wloc-lifecycle.py
+          python3 tests/test-bot-concurrency.py
+          python3 tests/test-custom-direct-persistence.py
+          python3 tests/test-firewall-local-services.py
 
       - name: "bot 测域名规则集显示名回归"
         run: python3 tests/test-domain-label.py

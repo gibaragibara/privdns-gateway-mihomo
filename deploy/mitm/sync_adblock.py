@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fnmatch
 import hashlib
 import ipaddress
 import json
@@ -23,6 +24,7 @@ DEFAULT_SOURCES = "/etc/privdns-gateway/adblock-sources.json"
 DEFAULT_OUTPUT = "/var/lib/pdg-wloc/adblock-rules.json"
 DEFAULT_DOMAIN_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
 DEFAULT_CLASSICAL_OUTPUT = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
+DEFAULT_MODULE_CACHE = "/var/lib/pdg-wloc/adblock-modules"
 USER_AGENT = "Egern/1.22.0 CFNetwork/1498.700.2 Darwin/23.6.0"
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_DOMAIN_SOURCE_BYTES = 16 * 1024 * 1024
@@ -38,6 +40,10 @@ MAX_PINNED_RESOURCES = 128
 MAX_SCRIPT_CONVERSION_ENTRIES = 512
 MAX_SCRIPT_CONVERSION_RULES = 1024
 MAX_JQ_PROGRAM_CHARS = 32_768
+MAX_MITM_HOSTS_PER_SOURCE = 2048
+MAX_MITM_HOSTS_TOTAL = 8192
+MAX_MITM_RULES_PER_SOURCE = 4096
+MAX_MITM_RULES_TOTAL = 20_000
 SOURCE_FETCH_WORKERS = 4
 SUPPORTED_ACTIONS = {
     "reject", "reject-200", "reject-dict", "reject-img",
@@ -342,53 +348,142 @@ def _external_jq_url(arguments):
     return _https_url(values[0].split("=", 1)[1], "jq-path")
 
 
-def _module_hosts(lines):
-    hosts = set()
+def _module_host_scope(lines):
+    scope = {
+        "exact": set(), "suffixes": set(),
+        "patterns": set(), "excluded_exact": set(),
+        "excluded_suffixes": set(), "excluded_patterns": set(),
+    }
     skipped = 0
     for line in lines:
-        if not line.startswith("hostname="):
+        match = re.match(r"hostname\s*=\s*(.*)$", line, re.IGNORECASE)
+        if not match:
             continue
-        for item in line.split("=", 1)[1].split(","):
-            host = item.strip().lower().lstrip("-")
-            if not host:
+        for item in match.group(1).split(","):
+            token = item.strip().lower().rstrip(".")
+            if not token or token in {"%append%", "%prepend%"}:
                 continue
-            if any(char in host for char in "*?[]"):
+            excluded = token.startswith("-")
+            if excluded:
+                token = token[1:].strip()
+            wildcard = token.startswith("*.") and not any(
+                char in token[2:] for char in "*?[]")
+            host = token[2:] if wildcard else token
+            glob = any(char in host for char in "*?")
+            valid_glob = (glob and "[" not in host and "]" not in host
+                          and re.fullmatch(r"(?=.{1,253}$)[a-z0-9*?](?:[a-z0-9.*?-]*"
+                                           r"[a-z0-9*?])?", host)
+                          and "." in host and ".." not in host)
+            if not HOST_RE.fullmatch(host) and not valid_glob:
                 skipped += 1
                 continue
-            if HOST_RE.fullmatch(host):
-                hosts.add(host)
+            if wildcard:
+                key = "excluded_suffixes" if excluded else "suffixes"
+            elif glob:
+                key = "excluded_patterns" if excluded else "patterns"
             else:
-                skipped += 1
-    return hosts, skipped
+                key = "excluded_exact" if excluded else "exact"
+            scope[key].add(host)
+    return scope, skipped
 
 
-def _pattern_target_hosts(pattern, hosts):
+def _expand_literal_host_regex(expression, limit=64):
+    """Expand a small, literal-only hostname regex into exact hostnames."""
+    expression = str(expression)
+    position = 0
+
+    def combine(left, right):
+        if len(left) * len(right) > limit:
+            raise CompileError("hostname regex expands to too many alternatives")
+        return [prefix + suffix for prefix in left for suffix in right]
+
+    def parse_group(stop=False):
+        nonlocal position
+        alternatives = []
+        current = [""]
+        while position < len(expression):
+            char = expression[position]
+            if char == ")":
+                if not stop:
+                    raise CompileError("unbalanced hostname regex group")
+                position += 1
+                alternatives.extend(current)
+                return alternatives
+            if char == "|":
+                alternatives.extend(current)
+                if len(alternatives) > limit:
+                    raise CompileError("hostname regex has too many alternatives")
+                current = [""]
+                position += 1
+                continue
+            if char == "(":
+                position += 1
+                if expression.startswith("?:", position):
+                    position += 2
+                group = parse_group(stop=True)
+                current = combine(current, group)
+                continue
+            if char == "\\":
+                position += 1
+                if position >= len(expression) or expression[position] not in ".-_":
+                    raise CompileError("hostname regex contains a non-literal escape")
+                token = expression[position]
+                position += 1
+            elif char.isascii() and (char.isalnum() or char in "-_"):
+                token = char
+                position += 1
+            else:
+                raise CompileError("hostname regex is not literal-only")
+            current = [value + token for value in current]
+        if stop:
+            raise CompileError("unbalanced hostname regex group")
+        alternatives.extend(current)
+        return alternatives
+
+    values = parse_group()
+    hosts = {value.lower().rstrip(".") for value in values
+             if HOST_RE.fullmatch(value.lower().rstrip("."))}
+    if not hosts or len(hosts) > limit:
+        raise CompileError("hostname regex does not resolve to exact hostnames")
+    return hosts
+
+
+def _pattern_literal_hosts(pattern):
     value = str(pattern).replace(r"\/", "/")
     marker = value.find("://")
     if marker < 0:
-        return set(hosts)  # A path-only expression may apply to every declared host.
-    start = marker + 3
-    bracket = False
-    escaped = False
-    end = len(value)
-    for index in range(start, len(value)):
-        char = value[index]
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == "[":
-            bracket = True
-        elif char == "]":
-            bracket = False
-        elif char == "/" and not bracket:
-            end = index
-            break
+        return set()
+    authority = value[marker + 3:].split("/", 1)[0]
     try:
-        host_pattern = re.compile(r"^(?:" + value[start:end] + r")$", re.IGNORECASE)
-    except re.error:
-        return set(hosts)  # Keep the declared scope when a hostname cannot be isolated safely.
-    return {host for host in hosts if host_pattern.fullmatch(host)}
+        return _expand_literal_host_regex(authority)
+    except CompileError:
+        return set()
+
+
+def _host_in_suffix(host, suffix):
+    return host.endswith("." + suffix)
+
+
+def _host_allowed(host, scope):
+    positive = host in scope["exact"] or any(
+        _host_in_suffix(host, suffix) for suffix in scope["suffixes"]) or any(
+        fnmatch.fnmatchcase(host, pattern) for pattern in scope["patterns"])
+    excluded = host in scope["excluded_exact"] or any(
+        _host_in_suffix(host, suffix) for suffix in scope["excluded_suffixes"]) or any(
+        fnmatch.fnmatchcase(host, pattern) for pattern in scope["excluded_patterns"])
+    return positive and not excluded
+
+
+def _pattern_target_hosts(pattern, scope, explicit_hosts=()):
+    value = str(pattern).replace(r"\/", "/")
+    candidates = set(explicit_hosts)
+    if "://" in value:
+        candidates.update(_pattern_literal_hosts(pattern))
+    else:
+        # A path-only expression may apply to every exact declared host. A
+        # wildcard scope still requires explicit exact hosts to avoid broad MITM.
+        candidates.update(scope["exact"])
+    return {host for host in candidates if _host_allowed(host, scope)}
 
 
 def _private_items(config, key, limit):
@@ -471,6 +566,20 @@ def _script_conversion_map(conversions, active_resources):
             if phase not in {"request", "response"} or not pattern or len(pattern) > 4096:
                 raise CompileError("script conversion phase or pattern is invalid")
             re.compile(pattern)
+            explicit_hosts = entry.get("hosts", group.get("hosts", []))
+            if explicit_hosts:
+                if (not isinstance(explicit_hosts, list)
+                        or len(explicit_hosts) > MAX_MITM_HOSTS_PER_SOURCE):
+                    raise CompileError("script conversion hosts must be a bounded list")
+                normalized_hosts = []
+                for value in explicit_hosts:
+                    host = str(value).strip().lower().rstrip(".")
+                    if not HOST_RE.fullmatch(host):
+                        raise CompileError("script conversion host is invalid")
+                    if host not in normalized_hosts:
+                        normalized_hosts.append(host)
+            else:
+                normalized_hosts = []
             raw_rules = entry.get("rules")
             if not isinstance(raw_rules, list) or not raw_rules:
                 raise CompileError("script conversion rules must be a non-empty list")
@@ -495,6 +604,7 @@ def _script_conversion_map(conversions, active_resources):
                     "pattern": rule_pattern,
                     "action": action,
                     "arguments": _conversion_arguments(action, raw.get("arguments", {})),
+                    "_hosts": normalized_hosts,
                 })
             key = (script_url, phase, pattern)
             if key in result:
@@ -532,7 +642,7 @@ def parse_module(text, name, source_url="", script_conversions=None, external_jq
             continue
         sections.setdefault(section, []).append(line)
 
-    hosts, skipped_hosts = _module_hosts(sections.get("MitM", []))
+    host_scope, skipped_hosts = _module_host_scope(sections.get("MitM", []))
     scripts = _script_declarations(sections.get("Script", []))
     script_conversions = script_conversions or {}
     external_jq = external_jq or {}
@@ -570,6 +680,9 @@ def parse_module(text, name, source_url="", script_conversions=None, external_jq
             "arguments": parsed,
             "source": str(name)[:80],
         })
+        if len(rules) > MAX_MITM_RULES_PER_SOURCE:
+            raise CompileError(
+                f"module exceeds the {MAX_MITM_RULES_PER_SOURCE}-rewrite limit")
 
     converted_scripts = 0
     converted_script_rules = 0
@@ -584,20 +697,33 @@ def parse_module(text, name, source_url="", script_conversions=None, external_jq
             rule["source"] = (str(name)[:65] + " (script)")[:80]
             rules.append(rule)
             converted_script_rules += 1
+            if len(rules) > MAX_MITM_RULES_PER_SOURCE:
+                raise CompileError(
+                    f"module exceeds the {MAX_MITM_RULES_PER_SOURCE}-rewrite limit")
 
     active_hosts = set()
+    executable_rules = []
     for rule in rules:
-        targets = sorted(_pattern_target_hosts(rule["pattern"], hosts))
+        explicit_hosts = rule.pop("_hosts", [])
+        targets = sorted(_pattern_target_hosts(
+            rule["pattern"], host_scope, explicit_hosts))
         rule["hosts"] = targets
-        active_hosts.update(targets)
+        if targets:
+            active_hosts.update(targets)
+            executable_rules.append(rule)
+    if len(active_hosts) > MAX_MITM_HOSTS_PER_SOURCE:
+        raise CompileError(
+            f"module exceeds the {MAX_MITM_HOSTS_PER_SOURCE}-host limit")
 
     return {
         "name": str(name)[:80],
         "url": str(source_url),
         "hosts": sorted(active_hosts),
-        "rules": rules,
+        "rules": executable_rules,
         "stats": {
-            "supported_rewrites": len(rules),
+            "parsed_rewrites": len(rules),
+            "supported_rewrites": len(executable_rules),
+            "unreachable_rewrites": len(rules) - len(executable_rules),
             "converted_script_rules": converted_script_rules,
             "unsupported_rewrites": sum(unsupported.values()) + invalid,
             "unsupported_actions": dict(sorted(unsupported.items())),
@@ -606,7 +732,13 @@ def parse_module(text, name, source_url="", script_conversions=None, external_jq
             "unported_scripts": len(scripts) - converted_scripts,
             "imported_external_jq": imported_external_jq,
             "skipped_hosts": skipped_hosts,
-            "unused_hosts": len(hosts - active_hosts),
+            "declared_exact_hosts": len(host_scope["exact"]),
+            "declared_wildcard_hosts": (len(host_scope["suffixes"])
+                                        + len(host_scope["patterns"])),
+            "excluded_module_hosts": (len(host_scope["excluded_exact"])
+                                      + len(host_scope["excluded_suffixes"])
+                                      + len(host_scope["excluded_patterns"])),
+            "unused_hosts": len(host_scope["exact"] - active_hosts),
         },
     }
 
@@ -631,6 +763,59 @@ def _fetched_source_batches(items, fetcher):
             yield pending
 
 
+def _module_digest(item, required=False):
+    digest = str(item.get("sha256") or "").strip().lower()
+    if not digest:
+        if required:
+            raise CompileError("module source is not approved; initialize or add its SHA256")
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise CompileError("module source SHA256 is invalid")
+    return digest
+
+
+def _module_cache_path(cache_dir, url, digest):
+    source_id = hashlib.sha256(str(url).encode()).hexdigest()[:24]
+    return os.path.join(str(cache_dir), f"{source_id}-{digest}.lpx")
+
+
+def _read_module_cache(cache_dir, url, digest):
+    if not cache_dir or not digest:
+        return None
+    path = _module_cache_path(cache_dir, url, digest)
+    try:
+        data = open(path, "rb").read(MAX_SOURCE_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > MAX_SOURCE_BYTES or hashlib.sha256(data).hexdigest() != digest:
+        return None
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+
+
+def _write_module_cache(cache_dir, url, digest, text):
+    if not cache_dir:
+        return
+    data = str(text).encode()
+    if len(data) > MAX_SOURCE_BYTES or hashlib.sha256(data).hexdigest() != digest:
+        raise CompileError("refusing to cache a module with mismatched SHA256")
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    os.chmod(cache_dir, 0o700)
+    destination = _module_cache_path(cache_dir, url, digest)
+    fd, temporary = tempfile.mkstemp(prefix=".module-", dir=cache_dir)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+            file.flush(); os.fsync(file.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def mitm_excluded_hosts(config):
     items = config.get("mitm_exclude_hosts", []) if isinstance(config, dict) else []
     if not isinstance(items, list):
@@ -653,7 +838,8 @@ def mitm_excluded_hosts(config):
     return sorted(hosts)
 
 
-def compile_sources(config, fetcher=fetch_text):
+def compile_sources(config, fetcher=fetch_text, module_cache_dir=None,
+                    require_module_pins=False):
     items = _enabled_source_items(config, "sources")
     configured_exclusions = set(mitm_excluded_hosts(config))
     conversions, jq_pins, active_resources, stale_resources, resource_failures = \
@@ -666,28 +852,102 @@ def compile_sources(config, fetcher=fetch_text):
     declared_hosts = set()
     seen_rules = set()
     failures = list(resource_failures)
+    warnings = []
+    pending_updates = []
+    cached_sources = 0
+    excluded_rewrites = 0
     for batch in _fetched_source_batches(items, fetcher):
         for item, future in batch:
             name = str(item.get("name") or "unnamed")[:80]
             url = str(item.get("url") or "")
             try:
+                approved_digest = _module_digest(item, required=require_module_pins)
+                fetched_text = future.result()
+                fetched_digest = hashlib.sha256(fetched_text.encode()).hexdigest()
+                pending_text = None
+                if approved_digest and fetched_digest != approved_digest:
+                    selected_text = _read_module_cache(
+                        module_cache_dir, url, approved_digest)
+                    if selected_text is None:
+                        raise CompileError(
+                            "module changed and its approved last-known-good cache is missing")
+                    pending_text = fetched_text
+                else:
+                    selected_text = fetched_text
+                    if approved_digest:
+                        _write_module_cache(
+                            module_cache_dir, url, approved_digest, selected_text)
                 module = parse_module(
-                    future.result(), name, url,
+                    selected_text, name, url,
                     script_conversions=conversion_map,
                     external_jq=external_jq,
                 )
-            except Exception as exc:  # one unavailable source must not discard the others
-                failures.append({"name": name, "error": str(exc)[:200]})
-                continue
-            compiled_sources.append({key: module[key] for key in ("name", "url", "stats")})
+            except Exception as exc:  # try the approved cache when the network is unavailable
+                try:
+                    approved_digest = _module_digest(item, required=require_module_pins)
+                    selected_text = _read_module_cache(
+                        module_cache_dir, url, approved_digest)
+                    if selected_text is None:
+                        raise exc
+                    module = parse_module(
+                        selected_text, name, url,
+                        script_conversions=conversion_map,
+                        external_jq=external_jq,
+                    )
+                    cached_sources += 1
+                    warnings.append({"name": name, "warning": "using approved cached module"})
+                    pending_text = None
+                    fetched_digest = ""
+                except Exception as cache_exc:  # noqa: BLE001
+                    failures.append({"name": name, "error": str(cache_exc)[:200]})
+                    continue
+            if pending_text is not None:
+                update = {
+                    "name": name, "url": url,
+                    "approved_sha256": approved_digest,
+                    "sha256": fetched_digest,
+                    "current_host_count": len(module["hosts"]),
+                    "current_rule_count": len(module["rules"]),
+                }
+                try:
+                    candidate = parse_module(
+                        pending_text, name, url,
+                        script_conversions=conversion_map,
+                        external_jq=external_jq,
+                    )
+                    update.update({
+                        "new_host_count": len(candidate["hosts"]),
+                        "new_rule_count": len(candidate["rules"]),
+                        "added_hosts": sorted(set(candidate["hosts"]) - set(module["hosts"]))[:64],
+                        "removed_hosts": sorted(set(module["hosts"]) - set(candidate["hosts"]))[:64],
+                    })
+                except Exception as exc:  # candidate is never activated on parse failure
+                    update["candidate_error"] = str(exc)[:200]
+                pending_updates.append(update)
+            source_summary = {key: module[key] for key in ("name", "url", "stats")}
+            if approved_digest:
+                source_summary["sha256"] = approved_digest
+            compiled_sources.append(source_summary)
             if not module["rules"]:
                 continue
             declared_hosts.update(module["hosts"])
+            if len(declared_hosts) > MAX_MITM_HOSTS_TOTAL:
+                raise CompileError(
+                    f"compiled MITM hosts exceed the {MAX_MITM_HOSTS_TOTAL}-host limit")
             for rule in module["rules"]:
+                filtered_hosts = [host for host in rule["hosts"]
+                                  if host not in configured_exclusions]
+                if not filtered_hosts:
+                    excluded_rewrites += 1
+                    continue
+                rule = {**rule, "hosts": filtered_hosts}
                 key = json.dumps(rule, ensure_ascii=False, sort_keys=True)
                 if key not in seen_rules:
                     seen_rules.add(key)
                     rules.append(rule)
+                    if len(rules) > MAX_MITM_RULES_TOTAL:
+                        raise CompileError(
+                            f"compiled MITM rules exceed the {MAX_MITM_RULES_TOTAL}-rule limit")
     excluded_hosts = declared_hosts & configured_exclusions
     hosts = declared_hosts - configured_exclusions
     stats = {
@@ -697,6 +957,11 @@ def compile_sources(config, fetcher=fetch_text):
         "declared_host_count": len(declared_hosts),
         "excluded_host_count": len(excluded_hosts),
         "rule_count": len(rules),
+        "unreachable_rewrites": sum(
+            s["stats"].get("unreachable_rewrites", 0) for s in compiled_sources),
+        "excluded_rewrites": excluded_rewrites,
+        "pending_module_updates": len(pending_updates),
+        "cached_module_sources": cached_sources,
         "script_declarations": sum(
             s["stats"].get("script_declarations", 0) for s in compiled_sources),
         "converted_scripts": sum(
@@ -722,6 +987,8 @@ def compile_sources(config, fetcher=fetch_text):
         "rules": rules,
         "sources": compiled_sources,
         "failures": failures,
+        "warnings": warnings,
+        "pending_updates": pending_updates,
         "stats": stats,
     }
 
@@ -1122,6 +1389,56 @@ def merge_source_defaults(path, defaults_path):
     return True
 
 
+def pin_missing_modules(path, fetcher=fetch_text, cache_dir=DEFAULT_MODULE_CACHE):
+    """Trust-on-first-use migration for legacy source entries without SHA256."""
+    with open(path, encoding="utf-8") as file:
+        config = json.load(file)
+    if not isinstance(config, dict):
+        raise CompileError("source config must be a JSON object")
+    items = _enabled_source_items(config, "sources")
+    missing = [item for item in items if not str(item.get("sha256") or "").strip()]
+    for item in items:
+        _module_digest(item, required=item not in missing)
+    if not missing:
+        return 0
+    fetched = {}
+    for batch in _fetched_source_batches(missing, fetcher):
+        for item, future in batch:
+            name = str(item.get("name") or "unnamed")[:80]
+            url = str(item.get("url") or "")
+            try:
+                text = future.result()
+                module = parse_module(text, name, url)
+                if (not module["rules"] and not module["hosts"]
+                        and not module["stats"].get("unported_scripts")
+                        and not re.search(
+                            r"(?mi)^\s*\[(?:rewrite|script|mitm|rule)\]\s*$", text)):
+                    raise CompileError("URL does not contain a recognized Loon/Egern module")
+                digest = hashlib.sha256(text.encode()).hexdigest()
+                _write_module_cache(cache_dir, url, digest, text)
+                fetched[id(item)] = digest
+            except Exception as exc:
+                raise CompileError(f"cannot initialize module pin for {name}: {exc}") from exc
+    for item in missing:
+        item["sha256"] = fetched[id(item)]
+
+    stat = os.stat(path)
+    directory = os.path.dirname(path) or "."
+    fd, temporary = tempfile.mkstemp(prefix=".adblock-pins-", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush(); os.fsync(file.fileno())
+        os.chmod(temporary, stat.st_mode & 0o777)
+        os.chown(temporary, stat.st_uid, stat.st_gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return len(missing)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sources", default=DEFAULT_SOURCES)
@@ -1131,16 +1448,25 @@ def main():
     parser.add_argument("--mihomo", default="mihomo")
     parser.add_argument("--merge-defaults")
     parser.add_argument("--merge-only", action="store_true")
+    parser.add_argument("--module-cache", default=DEFAULT_MODULE_CACHE)
+    parser.add_argument("--pin-missing-modules", action="store_true")
     parser.add_argument("--check-module-url")
     parser.add_argument("--check-domain-url")
     args = parser.parse_args()
     if args.check_module_url:
         parsed = urllib.parse.urlsplit(args.check_module_url)
         name = os.path.basename(parsed.path).rsplit(".", 1)[0] or parsed.hostname or "custom"
-        module = parse_module(fetch_text(args.check_module_url), name, args.check_module_url)
+        text = fetch_text(args.check_module_url)
+        module = parse_module(text, name, args.check_module_url)
         if not module["rules"] and not module["hosts"] and not module["stats"]["unported_scripts"]:
             raise SystemExit("URL does not contain a recognized Loon/Egern module")
-        print(json.dumps(module["stats"], ensure_ascii=False, sort_keys=True))
+        stats = dict(module["stats"])
+        stats.update({
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "host_count": len(module["hosts"]),
+            "rule_count": len(module["rules"]),
+        })
+        print(json.dumps(stats, ensure_ascii=False, sort_keys=True))
         return
     if args.check_domain_url:
         parsed = urllib.parse.urlsplit(args.check_domain_url)
@@ -1162,9 +1488,14 @@ def main():
             return
     elif args.merge_only:
         raise SystemExit("--merge-only requires --merge-defaults")
+    if args.pin_missing_modules:
+        count = pin_missing_modules(args.sources, cache_dir=args.module_cache)
+        print(json.dumps({"pinned_modules": count}, sort_keys=True))
+        return
     with open(args.sources, encoding="utf-8") as file:
         config = json.load(file)
-    compiled = compile_sources(config)
+    compiled = compile_sources(
+        config, module_cache_dir=args.module_cache, require_module_pins=True)
     domain = compile_domain_sources(config)
     failures = compiled["failures"] + domain["failures"]
     if failures:

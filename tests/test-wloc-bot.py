@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory() as td:
     bot.ADBLOCK_SOURCES = str(root / "adblock-sources.json")
     bot.ADBLOCK_DOMAIN_PROVIDER_FILE = str(root / "adblock-provider.mrs")
     bot.ADBLOCK_CLASSICAL_PROVIDER_FILE = str(root / "adblock-classical.yaml")
-    bot.MITM_LOCK_FILE = str(root / "pdg-mitm.lock")
+    bot.CONFIG_LOCK_FILE = str(root / "pdg-config.lock")
     bot.STATE = str(root / "state.json")
     bot.RS_DIR = str(root / "rs")
     bot.RS_META = str(root / "rulesets.json")
@@ -68,8 +68,10 @@ with tempfile.TemporaryDirectory() as td:
                                          encoding="utf-8")
     Path(bot.ADBLOCK_SOURCES).write_text(json.dumps({
         "sources": [
-            {"name": "插件一", "url": "https://example.com/one.lpx", "enabled": True},
-            {"name": "插件二", "url": "https://example.com/two.lpx", "enabled": True},
+            {"name": "插件一", "url": "https://example.com/one.lpx",
+             "sha256": "1" * 64, "enabled": True},
+            {"name": "插件二", "url": "https://example.com/two.lpx",
+             "sha256": "2" * 64, "enabled": True},
         ],
         "domain_sources": [{"name": "reject", "url": "https://example.com/reject.list"}],
         "local_domain_rules": ["ads.private.example"],
@@ -129,10 +131,14 @@ with tempfile.TemporaryDirectory() as td:
     assert ok and detail == ""
     assert Path(bot.MOSDNS_FORCE_PROXY).read_text() == "domain:push.example\n"
     bot._adblock_check_plugin = lambda _url: (True, {
-        "supported_rewrites": 2, "unported_scripts": 1,
+        "supported_rewrites": 2, "unported_scripts": 1, "sha256": "a" * 64,
     })
+    initial_sync = bot._adblock_sync_rules
+    bot._adblock_sync_rules = lambda: (True, {"rule_count": 2})
     ok, _ = bot.add_adblock_plugin("https://example.com/custom.lpx")
     assert ok and len(bot._adblock_module_sources()) == 3
+    assert bot._adblock_source_config()["sources"][-1]["sha256"] == "a" * 64
+    bot._adblock_sync_rules = initial_sync
     custom_id = bot._adblock_source_id("https://example.com/custom.lpx")
     ok, _ = bot.delete_adblock_plugin(custom_id)
     assert ok and len(bot._adblock_module_sources()) == 2
@@ -174,6 +180,37 @@ with tempfile.TemporaryDirectory() as td:
     assert not ok and "规则同步失败" in message and not sync_commands
     bot.sh = original_sh
     Path(bot.ADBLOCK_SOURCES).write_bytes(valid_sources)
+
+    pending_digest = "b" * 64
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({
+        "hosts": [], "rules": [],
+        "pending_updates": [{
+            "name": "插件一", "url": "https://example.com/one.lpx",
+            "approved_sha256": "1" * 64, "sha256": pending_digest,
+            "current_host_count": 1, "new_host_count": 2,
+            "current_rule_count": 3, "new_rule_count": 4,
+            "added_hosts": ["new.example.com"], "removed_hosts": [],
+        }],
+        "stats": {"pending_module_updates": 1},
+    }), encoding="utf-8")
+    pending_source = bot._adblock_module_sources()[0]
+    assert pending_source["pending"]["sha256"] == pending_digest
+    title, keyboard = bot._adblock_sources_page()
+    assert "待批准更新: <b>1</b>" in title
+    assert any(button.get("callback_data", "").startswith("adsrc_upd:")
+               for row in keyboard["inline_keyboard"] for button in row)
+    bot._adblock_check_plugin = lambda _url: (True, {
+        "sha256": pending_digest, "host_count": 2, "rule_count": 4,
+    })
+    original_sync = bot._adblock_sync_rules
+    bot._adblock_sync_rules = lambda: (True, {"pending_module_updates": 0})
+    ok, message = bot.approve_adblock_plugin_update(pending_source["id"])
+    assert ok and "已批准" in message
+    assert bot._adblock_source_config()["sources"][0]["sha256"] == pending_digest
+    bot._adblock_sync_rules = original_sync
+    Path(bot.ADBLOCK_RULES).write_text(json.dumps({"hosts": [], "rules": []}),
+                                         encoding="utf-8")
+    valid_sources = Path(bot.ADBLOCK_SOURCES).read_bytes()
 
     assert bot._adblock_sync_timeout() == 350
     large_source_config = {

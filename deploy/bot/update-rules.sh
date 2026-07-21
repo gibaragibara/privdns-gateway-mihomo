@@ -48,8 +48,9 @@ else
   echo "[!] geosite.dat 下载失败, 保留现有 apple/!cn"
 fi
 
-: > "$RULES_DIR/custom_direct.txt" 2>/dev/null || true
-[[ -f "$RULES_DIR/custom_direct.txt" ]] || : > "$RULES_DIR/custom_direct.txt"
+if [[ ! -e "$RULES_DIR/custom_direct.txt" ]]; then
+  install -m644 /dev/null "$RULES_DIR/custom_direct.txt"
+fi
 
 if systemctl is-active --quiet mosdns 2>/dev/null; then
   systemctl restart mosdns

@@ -283,11 +283,15 @@ def check_adblock():
         problems.append("mihomo 普通 REJECT 兼容规则缺失")
     if problems:
         return ("fail", "去广告", "; ".join(problems))
-    return ("ok", "去广告",
-            f"开启 → {stats.get('source_count', 0)} 模块 / "
-            f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 重写；"
-            f"排除 {stats.get('excluded_host_count', 0)} 主机；"
-            f"普通 REJECT {stats.get('domain_rule_count', 0)} 条")
+    pending = int(stats.get("pending_module_updates", 0) or 0)
+    unreachable = int(stats.get("unreachable_rewrites", 0) or 0)
+    detail = (f"开启 → {stats.get('source_count', 0)} 模块 / "
+              f"{stats.get('host_count', len(hosts))} 主机 / {stats.get('rule_count', 0)} 重写；"
+              f"不可达 {unreachable}；排除 {stats.get('excluded_host_count', 0)} 主机；"
+              f"普通 REJECT {stats.get('domain_rule_count', 0)} 条")
+    if pending:
+        return ("warn", "去广告", detail + f"；{pending} 个模块更新待批准")
+    return ("ok", "去广告", detail)
 
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():

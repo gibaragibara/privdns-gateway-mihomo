@@ -172,6 +172,17 @@ with tempfile.TemporaryDirectory() as td:
     assert "ad-marker" not in rewritten
     assert '"items":[{"id":2}]' in rewritten
 
+    dangerous = ('<script id="__NEXT_DATA__">'
+                 '{"items":[],"name":"\\u003c/script\\u003e\\u003cscript\\u003ealert(1)"}'
+                 '</script>')
+    escaped, count = adblock.rewrite_embedded_json(
+        dangerous, "__NEXT_DATA__", "keep-non-ads")
+    assert count == 1
+    assert escaped.lower().count("</script>") == 1
+    embedded = escaped.split(">", 1)[1].rsplit("<", 1)[0]
+    assert json.loads(embedded)["name"] == "</script><script>alert(1)"
+    assert "\\u003c/script\\u003e" in embedded
+
     response_mock = Flow(path="/response-header", headers={"Rpid": "promo"},
                          response=Response(200, b'{"upstream":true}'))
     addon.response(response_mock)

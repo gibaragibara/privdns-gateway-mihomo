@@ -232,6 +232,14 @@ def rewrite_embedded_json(text, element_id, program):
         value = run_jq(value, program)
         changed += 1
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        # JSON embedded in a script element must not be able to terminate the
+        # element. Preserve the decoded value while keeping HTML-significant
+        # characters and JavaScript line separators escaped.
+        encoded = (encoded.replace("&", r"\u0026")
+                   .replace("<", r"\u003c")
+                   .replace(">", r"\u003e")
+                   .replace("\u2028", r"\u2028")
+                   .replace("\u2029", r"\u2029"))
         return match.group(1) + encoded + match.group(4)
 
     return pattern.sub(replace, text), changed

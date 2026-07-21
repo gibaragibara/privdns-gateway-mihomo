@@ -4,6 +4,10 @@
 
 ## 2026-07-20 — 未发布(MITM 性能与嗅探稳定性)
 
+- MITM 模块正文首次添加即固定 SHA256；每日变化只进入 Bot 待批准队列，运行时继续使用校验过的 last-known-good 缓存。
+- 修复 `*.domain`、中间 glob 和 `-host` 的范围解析；只从 URL pattern 收敛精确 MITM 主机，并单列不可达规则。
+- 修复 HTML 内嵌 JSON 重新序列化可产生 `</script>` 的问题；GitHub 默认去广告来源改为空清单，不再携带实际 URL 或规则。
+- 修复每日更新/覆盖安装清空 `custom_direct.txt`、防火墙截走本机 `:81/:8445`、Bot 多线程共用 Telegram 连接及并发配置写入竞态。
 - 修复 mihomo `parse-pure-ip` 流量共享目标地址时的嗅探失败缓存污染；安装器改用锁定上游提交、仓库补丁、双架构 SHA256 校验的 `1.19.27-pdg1` 构建。
 - MITM 规则缓存增加逐主机索引，每个请求/响应只检查当前主机的规则；`upstream_cert=false` 配合 lazy 连接，合成广告响应不再先连接上游。
 - 兼容当前 mitmproxy 的 `warn` 日志 API，避免格式异常在记录告警时二次抛错；固定证书或高频核心 API 可继续通过服务器私有 `mitm_exclude_hosts` 旁路。

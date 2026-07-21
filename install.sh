@@ -232,7 +232,8 @@ if [[ "$REPO_DIR" != "/opt/privdns-gateway" ]]; then
   rm -rf /opt/privdns-gateway
   cp -a "$REPO_DIR" /opt/privdns-gateway 2>/dev/null || true
 fi
-: > /etc/mosdns/rules/custom_direct.txt
+[[ -e /etc/mosdns/rules/custom_direct.txt ]] \
+  || install -m644 /dev/null /etc/mosdns/rules/custom_direct.txt
 : > /etc/mosdns/rules/unlock.txt          # WDA 解锁域名集(空=休眠; bot『🔓 解锁走 WDA』填充)
 [[ -f /etc/mosdns/rules/wloc.txt ]] \
   || : > /etc/mosdns/rules/wloc.txt       # WLOC 两域名(空=Apple 定位不进共享 MITM)
@@ -293,6 +294,10 @@ install -m644 "$REPO_DIR"/deploy/firewall/journald-50-pdg.conf /etc/systemd/syst
 python3 /opt/pdg-bot/sync_adblock.py \
   --sources /etc/privdns-gateway/adblock-sources.json \
   --merge-defaults "$REPO_DIR"/deploy/mitm/adblock-sources.json --merge-only
+python3 /opt/pdg-bot/sync_adblock.py \
+  --sources /etc/privdns-gateway/adblock-sources.json \
+  --pin-missing-modules \
+  || die "现有 MITM 插件初始 SHA256 固定失败"
 
 # A preserved enabled state needs its compiled cache before Bot renders the
 # matching mosdns/mihomo exact-host routes.
