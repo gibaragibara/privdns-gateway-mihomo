@@ -17,12 +17,12 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Python 语法 (py_compile)
-        run: python3 -m py_compile deploy/bot/*.py deploy/wloc/*.py deploy/mitm/*.py tests/*.py
+        run: python3 -m py_compile deploy/bot/*.py deploy/wloc/*.py deploy/mitm/*.py deploy/relay/*.py tests/*.py
 
       - name: Shell 语法 (bash -n)
         run: |
           bash -n install.sh uninstall.sh \
-            deploy/bot/*.sh deploy/cert/*.sh deploy/mihomo/*.sh lib/*.sh
+            deploy/bot/*.sh deploy/cert/*.sh deploy/mihomo/*.sh deploy/relay/*.sh lib/*.sh
 
       - name: JSON 模板渲染后可解析
         run: |
@@ -40,7 +40,7 @@ jobs:
             if command -v jq >/dev/null; then render "$t" | jq -e . > /dev/null; fi
             echo "  OK"
           done
-          for f in deploy/wloc/*.json deploy/mitm/*.json; do
+          for f in deploy/wloc/*.json deploy/mitm/*.json deploy/relay/*.json; do
             echo "→ 校验 $f"
             python3 -m json.tool "$f" > /dev/null
             echo "  OK"
@@ -67,7 +67,7 @@ jobs:
               deploy/bot/pdg-bot.service deploy/bot/pdg-health.service \
               deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
               deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service \
-              deploy/wloc/pdg-wloc.service || true
+              deploy/wloc/pdg-wloc.service deploy/relay/pdg-relay.service || true
             echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
           else
             echo "systemd-analyze 不可用, 跳过"
@@ -78,7 +78,7 @@ jobs:
           command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
           shellcheck --severity=warning -e SC1091 \
             install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh \
-            deploy/mihomo/*.sh lib/*.sh tests/*.sh
+            deploy/mihomo/*.sh deploy/relay/*.sh lib/*.sh tests/*.sh
 
       - name: "防火墙迁移识别回归 (原装应迁移 / 自定义应跳过)"
         run: bash tests/test-fw-migration.sh
@@ -97,6 +97,11 @@ jobs:
 
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
+
+      - name: "Apple Relay 全量 profile / 隔离 TPROXY / 生命周期回归"
+        run: |
+          python3 tests/test-relay.py
+          python3 tests/test-china-relay.py
 
       - name: "共享 MITM 回归 (WLOC / 去广告 / Bot / 迁移 / 健康检查)"
         run: |

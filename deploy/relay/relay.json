@@ -1,0 +1,10 @@
+{
+  "enabled": false,
+  "host": "",
+  "listen_port": 20443,
+  "token": "",
+  "relay_uuid": "",
+  "payload_uuid": "",
+  "profile_uuid": "",
+  "created_at": null
+}

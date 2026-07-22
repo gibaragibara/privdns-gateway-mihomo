@@ -26,4 +26,13 @@ chmod 644 "$CERT_DIR/fullchain.pem"
 chmod 600 "$CERT_DIR/privkey.pem"
 
 systemctl is-active --quiet mosdns && systemctl restart mosdns
+
+# Relay reads a dedicated group-readable mirror instead of the root-only
+# Let's Encrypt key. Keep it synchronized only when the optional data plane is
+# active; a disabled Relay remains completely dormant.
+if systemctl is-active --quiet pdg-relay 2>/dev/null \
+    && [[ -x /usr/local/bin/pdg-relayctl ]]; then
+    /usr/local/bin/pdg-relayctl sync-cert >/dev/null 2>&1 \
+        && systemctl restart pdg-relay 2>/dev/null || true
+fi
 exit 0

@@ -100,17 +100,20 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-probe81 pdg-wloc mosdns mihomo \
+  systemctl disable --now pdg-bot pdg-probe81 pdg-wloc pdg-relay mosdns mihomo \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,pdg-wloc,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,pdg-wloc,pdg-relay,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
         /etc/systemd/system/journald.conf.d/50-pdg.conf
   systemctl daemon-reload 2>/dev/null
   nft delete table inet pdg 2>/dev/null
+  nft delete table inet pdg_relay 2>/dev/null
   /usr/local/bin/pdg-mihomo-tproxy.sh down 2>/dev/null || true
-  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway /var/lib/pdg-wloc
+  /usr/local/bin/pdg-relay-tproxy.sh down 2>/dev/null || true
+  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /opt/pdg-relay /etc/pdg-relay /etc/privdns-gateway /var/lib/pdg-wloc
   userdel pdg-wloc 2>/dev/null || true
-  rm -f /usr/local/bin/{pdg,pdg-set-token,pdg-mihomo-tproxy.sh,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
+  userdel pdg-relay 2>/dev/null || true
+  rm -f /usr/local/bin/{pdg,pdg-set-token,pdg-mihomo-tproxy.sh,pdg-relay-tproxy.sh,pdg-relayctl,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
   [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
   [[ "$MIHOMO_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mihomo
   # 还原系统级改动(仅全新安装才到这里)
@@ -205,10 +208,11 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/mihomo/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d /etc/mosdns/rules /etc/mihomo/rs /opt/pdg-bot /opt/pdg-relay/bin /etc/pdg-relay "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/parse-chinamax.py    /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/compile-china-rules.py /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
@@ -225,6 +229,8 @@ install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/l
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh       /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
 install -m755 "$REPO_DIR"/deploy/mihomo/pdg-mihomo-tproxy.sh              /usr/local/bin/
+install -m755 "$REPO_DIR"/deploy/relay/pdg-relay-tproxy.sh                /usr/local/bin/
+install -m755 "$REPO_DIR"/deploy/relay/pdg-relayctl.py                    /usr/local/bin/pdg-relayctl
 install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh                     /usr/local/bin/pdg-set-token
 install -m755 "$REPO_DIR"/deploy/bot/pdg.sh                               /usr/local/bin/pdg
 # 把仓库放到 /opt/privdns-gateway 供 `pdg update` / `pdg uninstall` 用
@@ -274,6 +280,8 @@ install -d -m700 /etc/privdns-gateway
   || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json
 [[ -f /etc/privdns-gateway/adblock-sources.json ]] \
   || install -m600 "$REPO_DIR"/deploy/mitm/adblock-sources.json /etc/privdns-gateway/adblock-sources.json
+[[ -f /etc/privdns-gateway/relay.json ]] \
+  || install -m600 "$REPO_DIR"/deploy/relay/relay.json /etc/privdns-gateway/relay.json
 ( umask 077; printf 'PDG_BOT_TOKEN=%s\nPDG_BOT_ALLOWED=%s\n' "$BOT_TOKEN" "$ALLOWED_IDS" > /etc/privdns-gateway/bot.env )
 chmod 600 /etc/privdns-gateway/bot.env
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/system/
@@ -281,6 +289,7 @@ install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/syste
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service       /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer         /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-probe81.service      /etc/systemd/system/
+install -m644 "$REPO_DIR"/deploy/relay/pdg-relay.service      /etc/systemd/system/
 id -u pdg-wloc >/dev/null 2>&1 || useradd --system --home-dir /var/lib/pdg-wloc --shell /usr/sbin/nologin pdg-wloc
 install -d -m755 /var/lib/pdg-wloc
 install -d -o pdg-wloc -g pdg-wloc -m700 /var/lib/pdg-wloc/mitmproxy
@@ -427,7 +436,7 @@ INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打�
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
-for s in mosdns mihomo pdg-bot pdg-probe81 pdg-wloc; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+for s in mosdns mihomo pdg-bot pdg-probe81 pdg-wloc pdg-relay; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"

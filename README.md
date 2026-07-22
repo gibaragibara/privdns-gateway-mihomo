@@ -1,25 +1,30 @@
 # PrivDNS Gateway
 
-**单入口、多出口的「私密 DNS 分流网关」** —— 手机端**只设系统私密 DNS(DoT)**,不装任何 VPN / 代理客户端;
-服务端按域名把流量分到不同落地或直连。
+**单入口、多出口的系统网络网关** —— 默认只设系统私密 DNS(DoT)；iOS 17+ 也可使用全设备
+Apple Network Relay，不装 Egern/Loon/Surge。服务端按域名把流量分到不同落地或直连。
 
 > 🚀 **第一次部署?** 跟着 **[新手图文教程 →](docs/QUICKSTART.md)** 一步步来(从买 VPS 到手机连上,全程带图)。
 
 ```
- 手机 (Android 私密DNS / iOS 描述文件, 仅 DoT)
-   │  DoT :853
+ 手机 ── Android / 旧 iOS: DoT :853
+   │
+   ├── iOS 17+ 全量模式: HTTP/2 Network Relay :20443
+   │                                  │
+   │                                  └─► 独立 UID output TPROXY ─┐
    ▼
  网关 VPS ── mosdns ──► 国内域名: 返回真实 IP (直连)
    │                   代理域名: A 记录劫持成「本机 IP」, AAAA/HTTPS 置空
    │  任意 tcp/udp 端口 TPROXY
    ▼
- mihomo ──► sniffer + 规则分流: AI/加密→落地A  其余国际→落地B  默认→本机直出
+ mihomo ◄────────────────────────────────────────────────────────┘
+   └──► sniffer + 规则分流 / ChinaMax 国内直出 / REJECT / 精确主机 MITM / 多出口
 ```
 
 核心思想:**把 DNS 当策略引擎**。
 代理域名的 A 记录被改写成网关自己的 IP,流量于是回到网关;
 mihomo TPROXY 透明接入后嗅探 SNI/Host/QUIC 再决定走哪个落地。
-手机全程只有一条「私密 DNS」设置,没有任何客户端、没有 tun。
+旧模式手机只有一条「私密 DNS」设置；全量 Relay 模式由 iOS 系统内建 Network Relay 接管 TCP/UDP，
+仍没有第三方代理客户端或 tun。
 
 ---
 
@@ -79,12 +84,13 @@ sudo ./install.sh
      > 其它 mihomo 支持但 bot 还没解析的协议,可手写 `/etc/mihomo/state.json` 后执行 `sudo pdg restart`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**(可填强制直连的 Wi-Fi SSID);**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
+3. iOS 旧 DoT 模式:bot **📱 客户端 → iOS 描述文件**(可填强制直连的 Wi-Fi SSID);**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝均靠服务器 `:81` 探测判定是否启用 DoT(普通宽带 Wi-Fi 探不通则自动直连)。
-4. iOS 网络虚拟定位(可选):主菜单 **📍 iOS 定位**或 `/wloc`。安装 Bot 下发的共享 CA 后，可直接点击服务器预置地点，不必发送 Telegram Location；也支持手工输入经纬度。服务端只对两个 Apple 定位域名启用 WLOC 改写，**无需 Egern/Surge/Loon**。详见 [WLOC 使用说明](docs/WLOC.md)。
-5. 服务端去广告(可选):主菜单 **🛡 去广告**或 `/adblock`。普通 Egern `REJECT` 规则由 mihomo 直接拦截，不需要证书；响应改写复用 WLOC 的共享 CA。关闭 WLOC 不会关闭仍被去广告使用的 MITM。详见 [服务端去广告说明](docs/MITM-ADBLOCK.md)。
-6. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
-7. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
+4. iOS 全量模式(可选):服务器运行 `sudo pdg relay enable`，再从 bot **📱 客户端 → iOS 全量 Relay**下发描述文件。全部域名进入 KFC 后继续复用 mihomo 分流、去广告和 WLOC；旧 DoT 链路保留回退。详见 [全量 Relay 说明](docs/RELAY.md)。
+5. iOS 网络虚拟定位(可选):主菜单 **📍 iOS 定位**或 `/wloc`。安装 Bot 下发的共享 CA 后，可直接点击服务器预置地点，不必发送 Telegram Location；也支持手工输入经纬度。服务端只对两个 Apple 定位域名启用 WLOC 改写，**无需 Egern/Surge/Loon**。详见 [WLOC 使用说明](docs/WLOC.md)。
+6. 服务端去广告(可选):主菜单 **🛡 去广告**或 `/adblock`。普通 Egern `REJECT` 规则由 mihomo 直接拦截，不需要证书；响应改写复用 WLOC 的共享 CA。关闭 WLOC 不会关闭仍被去广告使用的 MITM。详见 [服务端去广告说明](docs/MITM-ADBLOCK.md)。
+7. Android:系统**私密 DNS**填 DoT 域名即可。`853` 对公网开放,Wi-Fi 下不会因「私人 DNS 服务器无法访问」整网挂掉;只有内网卡段来源才会被 DNS 劫持进网关。
+8. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
 
@@ -100,6 +106,10 @@ sudo pdg restart    # 重启服务
 sudo pdg log [n]    # 看日志
 sudo pdg traffic    # 网卡流量(vnstat)
 sudo pdg ios        # 不用 bot, 直接出 iOS 描述文件二维码
+sudo pdg relay status                 # 全量 Apple Relay 状态
+sudo pdg relay enable                 # 并行启用 :20443 入口
+sudo pdg relay profile --output /tmp/PrivDNS-Full-Relay.mobileconfig
+sudo pdg relay disable                # 停 Relay，不动旧 DoT/TPROXY
 sudo pdg report     # 脱敏诊断报告(隐藏 token/密码/uuid); --redact-ip 连IP/域名也隐藏; --full 不脱敏
 sudo pdg detect-cidr # 抓包重新识别内网卡来源段, 与现配不符可一键写回并重启
 sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
@@ -115,6 +125,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853 公网)。WhatsApp 等无 SNI 域名返回真实 IP(配合 TPROXY) |
 | 流量 | **mihomo 1.19.27-pdg1** | `tproxy-port: 7893` + sniffer；补丁构建避免共享网关 IP 的嗅探失败缓存污染；多出口 url-test 故障切换 |
+| iOS 全量入口(可选) | **Envoy HTTP/2 Network Relay** | iOS 17+ 系统 Relay；独立 UID 的 TCP/UDP 出站经专用 nft TPROXY 返回 mihomo；默认 `:20443`，不抢旧链路的 `:443` |
 | 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/WLOC/去广告/自定义域名,改 mihomo 前 `mihomo -t`+回滚 |
 | 共享 MITM(可选) | **mitmproxy sidecar** | WLOC/去广告按功能独立启停并复用同一 CA；只监听本机 `:9080`，两项都关闭才停止 |
 | 证书 | **certbot standalone** | Let's Encrypt,签发/续期时临时处理 80 口并自动恢复 |
@@ -126,6 +137,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 - [docs/QUICKSTART.md](docs/QUICKSTART.md) — 新手图文
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
 - [docs/WLOC.md](docs/WLOC.md) — 无 Egern 的服务端 iOS WLOC、共享 CA 与恢复流程
+- [docs/RELAY.md](docs/RELAY.md) — iOS 全设备 Relay、MDM 边界、部署与回退
 - [docs/MITM-ADBLOCK.md](docs/MITM-ADBLOCK.md) — 普通 REJECT 规则、声明式模块移植范围与共享生命周期
 - [docs/UPSTREAM.md](docs/UPSTREAM.md) — 与上游关系 / 如何吸收新提交
 - [docs/production-notes.md](docs/production-notes.md) — 架构说明

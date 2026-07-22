@@ -2,6 +2,17 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-07-22 — 未发布(iOS 全设备 Apple Network Relay)
+
+- 新增 iOS 17+ `com.apple.relay.managed` 全域名 profile；不设置 `MatchDomains`，仅排除 Relay 自身域名以避免递归。
+- 新增 Envoy HTTP/2 CONNECT / CONNECT-UDP 入口；固定版本和双架构 SHA256，长连接关闭 5 分钟 idle timeout，避免 APNs 等安静连接被周期性切断。
+- Envoy 以独立 `pdg-relay` 用户运行；专用 nft output TPROXY 只捕获该 UID，再送入现有 mihomo，继续复用分流、REJECT、共享 MITM 和 WLOC。
+- ChinaMax 每日规则同时编译为 domain/ipcidr MRS；显式分流、REJECT、MITM 之后自动 KFC 直出，避免全量 Relay 把未命中的国内 App 送入默认国际出口。
+- 无原生 IPv6 默认路由的 KFC 会按 Envoy UID 将 IPv6 目标先送入 mihomo，避免 iOS App 因立即 `ENETUNREACH` 反复回退；中国 IP MRS 仅含 IPv4，IPv6 继续由默认代理处理。
+- Envoy 公网 listener 增加 1024 条全局下游连接上限与仅错误 access log；Relay 与 mihomo 绑定重启并等待 `:7893` 就绪，回滚到功能引入前的快照会移除新增文件、用户与路由。
+- Relay 默认监听 `:20443` 且显式启用，保留旧 `:443` 5GPN TPROXY 作为回退；安装、更新、快照回滚、卸载、doctor、Bot 客户端菜单均接入生命周期。
+- profile 可手工安装或由现有 MDM 下发；仓库不伪装提供 Apple MDM Push 证书、设备注册或 APNs 命令通道。
+
 ## 2026-07-22 — 未发布(WLOC 稳定性与更新回滚)
 
 - WLOC 现在只改写 Apple 网络定位响应中的经纬度，保留 Apple 原始精度和未知字段；避免“瞬移 + 过低精度”被 iOS 判为异常后回退真实位置。

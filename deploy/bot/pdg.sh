@@ -34,14 +34,14 @@ pdg_fetch_release_tags(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns mihomo pdg-bot pdg-probe81 pdg-wloc; do
+  for s in mosdns mihomo pdg-bot pdg-probe81 pdg-wloc pdg-relay; do
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports
-  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9080|9090)\b' | sed 's/^://' | sort -u \
-    | sed 's/^9080$/9080(local shared MITM)/; s/^9090$/9090(local clash_api)/' | tr '\n' ' ')
+  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9080|9090|20443)\b' | sed 's/^://' | sort -u \
+    | sed 's/^9080$/9080(local shared MITM)/; s/^9090$/9090(local clash_api)/; s/^20443$/20443(Apple Relay)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
 }
@@ -432,11 +432,12 @@ cmd_snapshot(){
   # Include every file an update can replace, not only live configuration. A
   # rollback must restore the old program, unit files, and certificate hooks too.
   candidates=(
-    etc/mosdns etc/mihomo etc/privdns-gateway etc/nftables.conf
-    opt/pdg-bot opt/privdns-gateway var/lib/pdg-wloc
+    etc/mosdns etc/mihomo etc/pdg-relay etc/privdns-gateway etc/nftables.conf
+    opt/pdg-bot opt/pdg-relay opt/privdns-gateway var/lib/pdg-wloc
     etc/systemd/system/pdg-bot.service
     etc/systemd/system/pdg-probe81.service
     etc/systemd/system/pdg-wloc.service
+    etc/systemd/system/pdg-relay.service
     etc/systemd/system/mosdns.service
     etc/systemd/system/mihomo.service
     etc/systemd/system/pdg-rules-update.service
@@ -449,6 +450,8 @@ cmd_snapshot(){
     usr/local/bin/pdg
     usr/local/bin/pdg-set-token
     usr/local/bin/pdg-mihomo-tproxy.sh
+    usr/local/bin/pdg-relay-tproxy.sh
+    usr/local/bin/pdg-relayctl
     usr/local/bin/proxy-gateway-open-cert-http.sh
     usr/local/bin/proxy-gateway-restore-firewall.sh
   )
@@ -472,7 +475,8 @@ cmd_snapshot(){
 
 cmd_rollback(){
   need_root rollback; _lock
-  local idx="" dir="" git_ref="" target f tmp tree members restore_archive
+  local idx="" dir="" git_ref="" target f tmp tree members restore_archive relay_wanted=0
+  local relay_snapshot_present=0
   local i path
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -518,6 +522,16 @@ cmd_rollback(){
   if ! tar xzf "$f" -C "$tree" 2>/dev/null; then
     echo "❌ 快照解包失败, 中止"; rm -rf "$tmp"; return 1
   fi
+  if [[ -f "$tree/etc/privdns-gateway/relay.json" ]] \
+      && jq -e '.enabled == true' "$tree/etc/privdns-gateway/relay.json" >/dev/null 2>&1; then
+    relay_wanted=1
+  fi
+  if [[ -e "$tree/etc/privdns-gateway/relay.json" \
+      || -e "$tree/etc/systemd/system/pdg-relay.service" \
+      || -e "$tree/usr/local/bin/pdg-relayctl" \
+      || -e "$tree/opt/pdg-relay" ]]; then
+    relay_snapshot_present=1
+  fi
   if [[ -f "$tree/etc/mihomo/config.yaml" ]]; then
     mihomo -t -d "$tree/etc/mihomo" -f "$tree/etc/mihomo/config.yaml" >/dev/null 2>&1 \
       || { echo "❌ 快照的 mihomo 配置 test 失败, 中止"; rm -rf "$tmp"; return 1; }
@@ -552,6 +566,34 @@ cmd_rollback(){
     fi
   else
     systemctl disable --now pdg-wloc >/dev/null 2>&1 || unrestored+=(pdg-wloc)
+  fi
+  if [[ "$relay_wanted" == 1 ]]; then
+    if ! systemctl reset-failed pdg-relay >/dev/null 2>&1 \
+        || ! systemctl enable --now pdg-relay >/dev/null 2>&1 \
+        || ! _pdg_wait_active pdg-relay; then
+      unrestored+=(pdg-relay)
+    fi
+  else
+    if [[ -x /usr/local/bin/pdg-relayctl ]]; then
+      /usr/local/bin/pdg-relayctl disable >/dev/null 2>&1 || unrestored+=(pdg-relay)
+    else
+      systemctl disable --now pdg-relay >/dev/null 2>&1 || true
+      /usr/local/bin/pdg-relay-tproxy.sh down >/dev/null 2>&1 || true
+    fi
+  fi
+  # Overlay extraction cannot remove files introduced after an old snapshot.
+  # If that snapshot predates Relay, remove the dormant component as well as
+  # its routes so rollback restores the original software surface exactly.
+  if [[ "$relay_snapshot_present" == 0 ]]; then
+    systemctl disable --now pdg-relay >/dev/null 2>&1 || true
+    /usr/local/bin/pdg-relay-tproxy.sh down >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/pdg-relay.service \
+      /usr/local/bin/pdg-relayctl /usr/local/bin/pdg-relay-tproxy.sh \
+      /etc/privdns-gateway/relay.json
+    rm -rf /etc/pdg-relay /opt/pdg-relay
+    userdel pdg-relay >/dev/null 2>&1 || true
+    groupdel pdg-relay >/dev/null 2>&1 || true
+    systemctl daemon-reload
   fi
   if [[ -n "$git_ref" ]]; then
     if [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" reset --hard -q "$git_ref" 2>/dev/null; then
@@ -620,6 +662,7 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py
   install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/parse-chinamax.py    /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/compile-china-rules.py /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
@@ -649,6 +692,8 @@ cmd_update(){
     || install -m600 "$REPO_DIR"/deploy/wloc/wloc-presets.json /etc/privdns-gateway/wloc-presets.json
   [[ -f /etc/privdns-gateway/adblock-sources.json ]] \
     || install -m600 "$REPO_DIR"/deploy/mitm/adblock-sources.json /etc/privdns-gateway/adblock-sources.json
+  [[ -f /etc/privdns-gateway/relay.json ]] \
+    || install -m600 "$REPO_DIR"/deploy/relay/relay.json /etc/privdns-gateway/relay.json
   install -m755 "$REPO_DIR"/deploy/wloc/wloc_mitm.py        /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/wloc/migrate_wloc.py     /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/mitm/adblock_mitm.py     /opt/pdg-bot/
@@ -677,6 +722,9 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
   install -m755 "$REPO_DIR"/deploy/mihomo/pdg-mihomo-tproxy.sh            /usr/local/bin/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/mihomo/mihomo.service                  /etc/systemd/system/ 2>/dev/null || true
+  install -m755 "$REPO_DIR"/deploy/relay/pdg-relay-tproxy.sh              /usr/local/bin/
+  install -m755 "$REPO_DIR"/deploy/relay/pdg-relayctl.py                  /usr/local/bin/pdg-relayctl
+  install -m644 "$REPO_DIR"/deploy/relay/pdg-relay.service                /etc/systemd/system/
   install -m755 "$REPO_DIR"/deploy/bot/pdg-set-token.sh     /usr/local/bin/pdg-set-token
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
@@ -689,6 +737,16 @@ cmd_update(){
     if ! python3 /opt/pdg-bot/sync_adblock.py; then
       c_y "去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
     fi
+  fi
+  if [[ -f /etc/mosdns/rules/ChinaMax.list ]]; then
+    if ! python3 /opt/pdg-bot/compile-china-rules.py \
+        /etc/mosdns/rules/ChinaMax.list /etc/mihomo/rs \
+        --converter /usr/local/bin/mihomo; then
+      c_y "ChinaMax MRS 编译失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
+    fi
+  elif jq -e '.enabled == true' /etc/privdns-gateway/relay.json >/dev/null 2>&1; then
+    c_y "Relay 已启用但缺少 ChinaMax.list, 拒绝让国内流量落入默认国际出口。"
+    cmd_rollback "${rollback_args[@]}"; return 1
   fi
   if ! python3 - <<'PY'
 import importlib.util
@@ -705,7 +763,7 @@ PY
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
-  if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
+  if ! python3 -m py_compile /opt/pdg-bot/*.py /usr/local/bin/pdg-relayctl 2>/dev/null; then
     c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
@@ -713,6 +771,15 @@ PY
   fi
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback "${rollback_args[@]}"; return 1
+  fi
+  local relay_enabled=0
+  if jq -e '.enabled == true' /etc/privdns-gateway/relay.json >/dev/null 2>&1; then
+    relay_enabled=1
+    if ! /usr/local/bin/pdg-relayctl ensure-envoy \
+        || ! /usr/local/bin/pdg-relayctl sync-cert \
+        || ! /usr/local/bin/pdg-relayctl validate; then
+      c_y "Relay 更新后校验失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
+    fi
   fi
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
@@ -731,6 +798,16 @@ PY
       || ! _pdg_wait_active mosdns \
       || ! _pdg_wait_active mihomo; then
     c_y "核心服务更新后未稳定运行, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
+  fi
+  if [[ "$relay_enabled" == 1 ]]; then
+    if ! systemctl enable --now pdg-relay >/dev/null 2>&1 \
+        || ! systemctl restart pdg-relay \
+        || ! _pdg_wait_active pdg-relay; then
+      c_y "Relay 更新后未稳定运行, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
+    fi
+  else
+    systemctl disable --now pdg-relay >/dev/null 2>&1 || true
+    /usr/local/bin/pdg-relay-tproxy.sh down >/dev/null 2>&1 || true
   fi
   systemctl try-restart pdg-bot pdg-probe81 >/dev/null 2>&1 || true
 
@@ -766,10 +843,22 @@ cmd_restart(){
   need_root restart
   systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null
   systemctl try-restart pdg-wloc 2>/dev/null || true
-  echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81 (任一 MITM 功能开启时一并重启 sidecar)"
+  if jq -e '.enabled == true' /etc/privdns-gateway/relay.json >/dev/null 2>&1; then
+    _pdg_wait_active pdg-relay 20 \
+      || systemctl restart pdg-relay 2>/dev/null \
+      || c_y "pdg-relay 重启失败，请看 pdg log"
+  fi
+  echo "已重启 mosdns / mihomo / pdg-bot / pdg-probe81 (启用中的 MITM / Relay 一并重启)"
 }
 
-cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -u pdg-wloc -n "${1:-40}" --no-pager -o cat; }
+cmd_log(){ journalctl -u pdg-bot -u mosdns -u mihomo -u pdg-wloc -u pdg-relay -n "${1:-40}" --no-pager -o cat; }
+
+cmd_relay(){
+  need_root relay
+  [[ -x /usr/local/bin/pdg-relayctl ]] \
+    || { echo "缺少 pdg-relayctl，请先运行 sudo pdg update"; return 1; }
+  /usr/local/bin/pdg-relayctl "$@"
+}
 
 cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
 
@@ -868,7 +957,8 @@ menu(){
     echo " 10) iOS 描述文件"
     echo " 11) 诊断报告 (脱敏)"
     echo " 12) 识别内网卡段"
-    echo " 13) 卸载"
+    echo " 13) 全设备 Apple Relay"
+    echo " 14) 卸载"
     echo "  0) 退出"
     echo "  下次打开本菜单命令: pdg"
     printf "选择: "
@@ -886,7 +976,9 @@ menu(){
       10) cmd_ios;;
       11) cmd_report;;
       12) cmd_detect_cidr;;
-      13) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
+      13) echo "用法: pdg relay status|enable|disable|profile|rotate-token"
+          cmd_relay status;;
+      14) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
          case "$x" in yes) cmd_uninstall;; purge) cmd_uninstall --purge;; *) echo "已取消";; esac;;
       0|q) exit 0;;
       *) echo "无效选择";;
@@ -919,8 +1011,9 @@ case "${1:-menu}" in
   log|logs)      shift || true; cmd_log "${1:-40}";;
   traffic|tr)    cmd_traffic;;
   ios)           cmd_ios;;
+  relay)         shift || true; cmd_relay "$@";;
   report)        shift || true; cmd_report "$@";;
   detect-cidr|cidr) shift || true; cmd_detect_cidr "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|relay <status|enable|disable|profile|rotate-token>|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
 esac

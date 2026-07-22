@@ -19,7 +19,8 @@ with tempfile.TemporaryDirectory() as td:
     rules = root / "rules"
     bot_dir = root / "bot"
     bin_dir = root / "bin"
-    rules.mkdir(); bot_dir.mkdir(); bin_dir.mkdir()
+    mihomo_rules = root / "mihomo-rules"
+    rules.mkdir(); bot_dir.mkdir(); bin_dir.mkdir(); mihomo_rules.mkdir()
     direct = rules / "custom_direct.txt"
     direct.write_text("# keep\ndomain:updates.example\n", encoding="utf-8")
 
@@ -29,6 +30,7 @@ target = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])
 target.write_text('# UPDATED test\\nDOMAIN-SUFFIX,example.cn\\n', encoding='utf-8')
 """)
     executable(bin_dir / "systemctl", "#!/bin/sh\nexit 1\n")
+    executable(bin_dir / "mihomo", "#!/bin/sh\nexit 0\n")
     executable(bot_dir / "parse-chinamax.py", """#!/usr/bin/env python3
 import pathlib, sys
 pathlib.Path(sys.argv[2]).write_text('domain:example.cn\\n', encoding='utf-8')
@@ -39,11 +41,19 @@ out = pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 for name in ('apple', 'geolocation-!cn', 'cn'):
     (out / ('geosite_' + name + '.txt')).write_text('domain:example.com\\n', encoding='utf-8')
 """)
+    executable(bot_dir / "compile-china-rules.py", """#!/usr/bin/env python3
+import pathlib, sys
+out = pathlib.Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
+for name in ('__pdg_china_domain.mrs', '__pdg_china_ip.mrs', '__pdg_china_classical.yaml'):
+    (out / name).write_text('valid\\n', encoding='utf-8')
+""")
     env = dict(os.environ)
     env.update({
         "PATH": str(bin_dir) + os.pathsep + env["PATH"],
         "PDG_MOSDNS_RULES": str(rules),
         "PDG_BOT_DIR": str(bot_dir),
+        "PDG_MIHOMO_RS": str(mihomo_rules),
+        "PDG_MIHOMO_BIN": str(bin_dir / "mihomo"),
     })
     subprocess.run(
         ["bash", str(ROOT / "deploy/bot/update-rules.sh")],

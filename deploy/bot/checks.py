@@ -15,6 +15,11 @@ ADBLOCK_RULES = "/var/lib/pdg-wloc/adblock-rules.json"
 ADBLOCK_DOMAINS = "/etc/mosdns/rules/adblock.txt"
 ADBLOCK_DOMAIN_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
 ADBLOCK_CLASSICAL_PROVIDER = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
+RELAY_CONFIG = "/etc/privdns-gateway/relay.json"
+RELAY_ENVOY_CONFIG = "/etc/pdg-relay/envoy.yaml"
+CHINA_DOMAIN_PROVIDER = "/etc/mihomo/rs/__pdg_china_domain.mrs"
+CHINA_IP_PROVIDER = "/etc/mihomo/rs/__pdg_china_ip.mrs"
+CHINA_CLASSICAL_PROVIDER = "/etc/mihomo/rs/__pdg_china_classical.yaml"
 
 def _run(cmd, t=10):
     try:
@@ -22,6 +27,13 @@ def _run(cmd, t=10):
         return p.returncode, p.stdout, p.stderr
     except Exception as e:  # noqa: BLE001
         return 1, "", str(e)
+
+
+def _nonempty_file(path):
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
 
 def _mos():
     try:
@@ -182,6 +194,56 @@ def check_mihomo_config():
     rc, out, err = _run(["mihomo", "-t", "-d", "/etc/mihomo"], t=20)
     return ("ok", "mihomo 配置", "test 通过") if rc == 0 \
         else ("fail", "mihomo 配置", "test 失败: " + (out + err)[-200:])
+
+
+def check_relay():
+    try:
+        config = json.load(open(RELAY_CONFIG))
+    except FileNotFoundError:
+        return ("ok", "Apple Relay", "未配置（旧 DoT/TPROXY 模式）")
+    except Exception as exc:  # noqa: BLE001
+        return ("fail", "Apple Relay", f"配置损坏: {exc}")
+    if not isinstance(config, dict):
+        return ("fail", "Apple Relay", "配置不是对象")
+    if not bool(config.get("enabled")):
+        active = _run(["systemctl", "is-active", "pdg-relay"])[1].strip() == "active"
+        return (("warn", "Apple Relay", "配置已关闭但服务仍在运行") if active
+                else ("ok", "Apple Relay", "已关闭（旧链路仍可回退）"))
+    host = str(config.get("host") or "")
+    try:
+        port = int(config.get("listen_port"))
+    except (TypeError, ValueError):
+        port = 0
+    problems = []
+    if not host or not (1024 <= port <= 65535):
+        problems.append("入口域名/端口无效")
+    if _run(["systemctl", "is-active", "pdg-relay"])[1].strip() != "active":
+        problems.append("pdg-relay 未运行")
+    if not os.path.exists(RELAY_ENVOY_CONFIG):
+        problems.append("Envoy 配置缺失")
+    china_files = (CHINA_DOMAIN_PROVIDER, CHINA_IP_PROVIDER, CHINA_CLASSICAL_PROVIDER)
+    if any(not _nonempty_file(path) for path in china_files):
+        problems.append("ChinaMax 直连 MRS 缺失")
+    try:
+        mihomo_config = open(MIHOMO_CFG, encoding="utf-8").read()
+    except OSError:
+        mihomo_config = ""
+    if not all(marker in mihomo_config for marker in (
+            "RULE-SET,__pdg_china_domain,DIRECT",
+            "RULE-SET,__pdg_china_ip,DIRECT,no-resolve")):
+        problems.append("mihomo 未加载 ChinaMax 直连规则")
+    _, nft_output, _ = _run(["nft", "list", "table", "inet", "pdg_relay"])
+    if "meta skuid" not in nft_output or "tproxy" not in nft_output:
+        problems.append("Relay 专用 TPROXY 表缺失")
+    _, ipv6_rules, _ = _run(["ip", "-6", "rule", "show"])
+    if "uidrange" not in ipv6_rules or "lookup 10123" not in ipv6_rules:
+        problems.append("Relay IPv6 UID 路由缺失")
+    _, sockets, _ = _run(["ss", "-lntH"])
+    if port and not re.search(rf":{port}\b", sockets):
+        problems.append(f":{port} 未监听")
+    if problems:
+        return ("fail", "Apple Relay", "; ".join(problems))
+    return ("ok", "Apple Relay", f"全量入口 https://{host}:{port}/ → mihomo")
 
 def check_wloc():
     try:
@@ -440,8 +502,8 @@ def check_deep_upstreams():
 
 ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
        check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config,
-       check_wloc, check_adblock]
-ALERT = [check_services, check_dns, check_cert, check_wloc, check_adblock]  # 运行期故障
+       check_relay, check_wloc, check_adblock]
+ALERT = [check_services, check_dns, check_cert, check_relay, check_wloc, check_adblock]  # 运行期故障
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
 

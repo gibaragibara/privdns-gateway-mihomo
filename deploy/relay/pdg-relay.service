@@ -1,0 +1,44 @@
+[Unit]
+Description=PrivDNS Apple Network Relay (Envoy HTTP/2 CONNECT)
+Requires=mihomo.service
+BindsTo=mihomo.service
+PartOf=mihomo.service
+After=network-online.target mihomo.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pdg-relay
+Group=pdg-relay
+# The setup steps must retain root privileges; Envoy itself never does.
+ExecStartPre=+/usr/local/bin/pdg-relayctl sync-cert
+ExecStartPre=+/usr/local/bin/pdg-relayctl render
+ExecStartPre=+/usr/local/bin/pdg-relay-tproxy.sh up
+ExecStart=/opt/pdg-relay/bin/envoy -c /etc/pdg-relay/envoy.yaml --log-level warning
+ExecStopPost=+/usr/local/bin/pdg-relay-tproxy.sh down
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=120s
+TimeoutStopSec=30s
+LimitNOFILE=1048576
+UMask=0027
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/etc/pdg-relay
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

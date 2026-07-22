@@ -7,14 +7,49 @@ set -euo pipefail
 
 RULES_DIR="${PDG_MOSDNS_RULES:-/etc/mosdns/rules}"
 BOT_DIR="${PDG_BOT_DIR:-/opt/pdg-bot}"
+MIHOMO_RS="${PDG_MIHOMO_RS:-/etc/mihomo/rs}"
+MIHOMO_BIN="${PDG_MIHOMO_BIN:-$(command -v mihomo 2>/dev/null || true)}"
 CHINAMAX_URL="${PDG_CHINAMAX_URL:-https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/ChinaMax/ChinaMax.list}"
 # 备用 CDN (raw 失败时)
 CHINAMAX_URL_FALLBACK="${PDG_CHINAMAX_URL_FALLBACK:-https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/ChinaMax/ChinaMax.list}"
 GEOSITE_URL="${PDG_GEOSITE_URL:-https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat}"
 
-mkdir -p "$RULES_DIR"
+mkdir -p "$RULES_DIR" "$MIHOMO_RS"
 WORK="$(mktemp -d /tmp/pdg-rules.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+CHINA_OUTPUTS=(__pdg_china_domain.mrs __pdg_china_ip.mrs __pdg_china_classical.yaml)
+
+backup_china_providers() {
+  local name
+  mkdir -p "$WORK/china-backup"
+  for name in "${CHINA_OUTPUTS[@]}"; do
+    if [[ -f "$MIHOMO_RS/$name" ]]; then
+      cp -p "$MIHOMO_RS/$name" "$WORK/china-backup/$name"
+    else
+      : > "$WORK/china-backup/.absent-$name"
+    fi
+  done
+}
+
+restore_china_providers() {
+  local name
+  for name in "${CHINA_OUTPUTS[@]}"; do
+    if [[ -f "$WORK/china-backup/$name" ]]; then
+      install -m600 "$WORK/china-backup/$name" "$MIHOMO_RS/$name"
+    elif [[ -f "$WORK/china-backup/.absent-$name" ]]; then
+      rm -f "$MIHOMO_RS/$name"
+    fi
+  done
+}
+
+refresh_china_routes() {
+  [[ -f "$BOT_DIR/bot.py" && -f /etc/mihomo/state.json ]] || return 0
+  (
+    cd "$BOT_DIR" || exit 1
+    PDG_BOT_TOKEN='' /usr/bin/python3 -c \
+      'import bot; ok, msg = bot.refresh_china_routes(); print(msg or "ChinaMax mihomo routes refreshed"); raise SystemExit(0 if ok else 1)'
+  )
+}
 
 download() {
   local url="$1" out="$2"
@@ -29,6 +64,22 @@ fi
 # 保留一份原始 list 便于对照版本
 install -m644 "$WORK/ChinaMax.list" "$RULES_DIR/ChinaMax.list"
 python3 "$BOT_DIR/parse-chinamax.py" "$WORK/ChinaMax.list" "$RULES_DIR/geosite_cn.txt"
+[[ -n "$MIHOMO_BIN" && -x "$MIHOMO_BIN" ]] \
+  || { echo "[x] 找不到 mihomo，无法编译 ChinaMax MRS" >&2; exit 1; }
+[[ -f "$BOT_DIR/compile-china-rules.py" ]] \
+  || { echo "[x] 缺少 compile-china-rules.py" >&2; exit 1; }
+backup_china_providers
+if ! python3 "$BOT_DIR/compile-china-rules.py" \
+    "$WORK/ChinaMax.list" "$MIHOMO_RS" --converter "$MIHOMO_BIN"; then
+  restore_china_providers
+  exit 1
+fi
+if ! refresh_china_routes; then
+  echo "[x] ChinaMax MRS 校验/加载失败，恢复旧规则" >&2
+  restore_china_providers
+  refresh_china_routes >/dev/null 2>&1 || true
+  exit 1
+fi
 
 echo "[*] 下载 Loyalsoldier geosite.dat (apple / !cn 补充)…"
 if download "$GEOSITE_URL" "$WORK/geosite.dat"; then

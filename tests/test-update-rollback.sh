@@ -54,6 +54,9 @@ c_y(){ printf '%s\n' "\$*"; }
 systemctl(){ return 0; }
 nft(){ return 0; }
 jq(){ return 1; }
+rm(){ printf 'rm %s\n' "$*" >> "$WORK/cleanup.log"; }
+userdel(){ printf 'userdel %s\n' "$*" >> "$WORK/cleanup.log"; }
+groupdel(){ printf 'groupdel %s\n' "$*" >> "$WORK/cleanup.log"; }
 _pdg_wait_active(){ return 0; }
 # macOS still ships Bash 3.2, while the production script uses Bash 4's
 # mapfile. This small compatibility shim lets the sandbox exercise index 0.
@@ -76,7 +79,8 @@ run_rollback(){
 }
 
 out=$(run_rollback --dir "$SNAP/A" --git "$GOOD_REF")
-if [[ "$(cat "$WORK/applied")" == OLD ]] && [[ "$(git -C "$REPO" rev-parse HEAD)" == "$GOOD_REF" ]]; then
+if [[ "$(cat "$WORK/applied")" == OLD ]] \
+    && [[ "$(git -C "$REPO" rev-parse HEAD)" == "$GOOD_REF" ]]; then
   ok "--dir 精确恢复指定旧快照，并复位 Git 提交"
 else
   bad "--dir/Git 精确回滚失败: $out"
@@ -105,6 +109,8 @@ if grep -q '_PDG_SNAP_CREATED' "$script" \
     && grep -q '更新前快照失败，拒绝' "$script" \
     && grep -q 'merge-base --is-ancestor "\$pre_sha" "\$tgt"' "$script" \
     && grep -q 'cmd_rollback "\${rollback_args\[@\]}"' "$script" \
+    && grep -q 'relay_snapshot_present' "$script" \
+    && grep -q 'rm -rf /etc/pdg-relay /opt/pdg-relay' "$script" \
     && ! grep -q 'cmd_rollback 0' "$script"; then
   ok "更新链路使用完整快照、前进式 tag 校验和精确回滚"
 else

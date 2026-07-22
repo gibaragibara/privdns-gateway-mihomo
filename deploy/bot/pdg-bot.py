@@ -11,7 +11,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, contextlib, fcntl, hashlib, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, contextlib, fcntl, hashlib, html, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
@@ -27,6 +27,9 @@ MOSDNS_FORCE_PROXY = "/etc/mosdns/rules/force_proxy.txt"
 RS_META = "/opt/pdg-bot/rulesets.json"
 UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
+RELAY_CONFIG = "/etc/privdns-gateway/relay.json"
+RELAY_CTL = "/usr/local/bin/pdg-relayctl"
+RELAY_SERVICE = "pdg-relay"
 CERT = os.environ.get("PDG_CERT", "/etc/mosdns/certs/fullchain.pem")
 CERT_DIR = os.path.dirname(CERT)
 CLASH = "http://127.0.0.1:9090"
@@ -49,6 +52,12 @@ ADBLOCK_DOMAIN_PROVIDER = "__pdg_adblock_reject"
 ADBLOCK_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject.mrs"
 ADBLOCK_CLASSICAL_PROVIDER = "__pdg_adblock_reject_classical"
 ADBLOCK_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_adblock_reject_classical.yaml"
+CHINA_DOMAIN_PROVIDER = "__pdg_china_domain"
+CHINA_DOMAIN_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_china_domain.mrs"
+CHINA_IP_PROVIDER = "__pdg_china_ip"
+CHINA_IP_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_china_ip.mrs"
+CHINA_CLASSICAL_PROVIDER = "__pdg_china_classical"
+CHINA_CLASSICAL_PROVIDER_FILE = "/etc/mihomo/rs/__pdg_china_classical.yaml"
 ADBLOCK_SOURCE_LIMIT = 64
 ADBLOCK_PRIVATE_RESOURCE_LIMIT = 128
 ADBLOCK_FETCH_WORKERS = 4
@@ -549,7 +558,8 @@ def _nav(key):
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\n"
-                   "iOS 可生成私密 DNS 描述文件，或使用共享 MITM 功能:", [
+                   "iOS 可使用旧私密 DNS 或全设备 Relay:", [
+            [{"text": "🌐 iOS 全量 Relay", "callback_data": "relay"}],
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"},
              {"text": "📍 iOS 虚拟定位", "callback_data": "wloc"}],
             [{"text": "🛡 去广告", "callback_data": "adblock"}],
@@ -967,6 +977,13 @@ def _rule_provider_path(name, meta):
             pass
     return os.path.join(RS_DIR, name + ".yaml")
 
+
+def _nonempty_file(path):
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
 def _mihomo_config(c):
     meta = _rs_meta()
     proxies, groups = [], []
@@ -1005,6 +1022,23 @@ def _mihomo_config(c):
     if domain_rule_count and domain_classical_rule_count:
         providers[ADBLOCK_CLASSICAL_PROVIDER] = {
             "type": "file", "behavior": "classical", "path": ADBLOCK_CLASSICAL_PROVIDER_FILE,
+        }
+    china_domain_ready = _nonempty_file(CHINA_DOMAIN_PROVIDER_FILE)
+    china_ip_ready = _nonempty_file(CHINA_IP_PROVIDER_FILE)
+    china_classical_ready = _nonempty_file(CHINA_CLASSICAL_PROVIDER_FILE)
+    if china_domain_ready:
+        providers[CHINA_DOMAIN_PROVIDER] = {
+            "type": "file", "behavior": "domain", "format": "mrs",
+            "path": CHINA_DOMAIN_PROVIDER_FILE,
+        }
+    if china_ip_ready:
+        providers[CHINA_IP_PROVIDER] = {
+            "type": "file", "behavior": "ipcidr", "format": "mrs",
+            "path": CHINA_IP_PROVIDER_FILE,
+        }
+    if china_classical_ready:
+        providers[CHINA_CLASSICAL_PROVIDER] = {
+            "type": "file", "behavior": "classical", "path": CHINA_CLASSICAL_PROVIDER_FILE,
         }
     # Exact-domain rules must precede the server-IP reject rule. The phone sees the
     # gateway IP from mosdns; mihomo's TLS sniffer restores the Apple hostname.
@@ -1060,6 +1094,16 @@ def _mihomo_config(c):
             rules.append(f"DOMAIN-KEYWORD,{k},{target}")
         for cidr in r.get("ip_cidr", []):
             rules.append(f"IP-CIDR,{cidr},{target},no-resolve")
+    # In legacy DoT mode most Chinese destinations bypass mihomo at DNS time.
+    # A full-device Apple Relay sends them here too, so apply the same ChinaMax
+    # policy before the user's international fallback. Explicit user routes,
+    # REJECT and precise MITM hosts above remain authoritative.
+    if china_domain_ready:
+        rules.append(f"RULE-SET,{CHINA_DOMAIN_PROVIDER},DIRECT")
+    if china_classical_ready:
+        rules.append(f"RULE-SET,{CHINA_CLASSICAL_PROVIDER},DIRECT")
+    if china_ip_ready:
+        rules.append(f"RULE-SET,{CHINA_IP_PROVIDER},DIRECT,no-resolve")
     rules.append("MATCH," + c.get("route", {}).get("final", "jp"))
     cfg = {
         "tproxy-port": 7893,
@@ -1159,6 +1203,37 @@ def apply_sb(modify):
                 sh(["systemctl", "reset-failed", "mihomo"])
                 sh(["systemctl", "restart", "mihomo"])
                 return False, "重启 mihomo 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
+            return True, ""
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def refresh_china_routes():
+    """Re-render ChinaMax providers without assuming mihomo is already active."""
+    active = sh(["systemctl", "is-active", "mihomo"]).stdout.strip() == "active"
+    if active:
+        return apply_sb(lambda _config: None)
+    with _config_lock():
+        backup_dir = tempfile.mkdtemp(prefix=".pdg-china-render-", dir=os.path.dirname(STATE))
+        state_backup = os.path.join(backup_dir, "state.json")
+        config_backup = os.path.join(backup_dir, "config.yaml")
+        had_config = os.path.exists(MIHOMO_CFG)
+        try:
+            shutil.copy2(STATE, state_backup)
+            if had_config:
+                shutil.copy2(MIHOMO_CFG, config_backup)
+            try:
+                _write(load())
+                checked = sh(["mihomo", "-t", "-d", os.path.dirname(MIHOMO_CFG)])
+                if checked.returncode:
+                    raise RuntimeError((checked.stdout + checked.stderr).strip()[-400:])
+            except Exception as exc:  # noqa: BLE001
+                shutil.copy2(state_backup, STATE)
+                if had_config:
+                    shutil.copy2(config_backup, MIHOMO_CFG)
+                elif os.path.exists(MIHOMO_CFG):
+                    os.unlink(MIHOMO_CFG)
+                return False, "ChinaMax 路由渲染失败, 已回滚: " + str(exc)[-400:]
             return True, ""
         finally:
             shutil.rmtree(backup_dir, ignore_errors=True)
@@ -2987,6 +3062,67 @@ def _ios_profile(ssids=()):
         0, {"InterfaceTypeMatch": "WiFi", "SSIDMatch": list(ssids), "Action": "Disconnect"})
     return plistlib.dumps(p)
 
+
+def _relay_status():
+    if not os.path.exists(RELAY_CTL):
+        return {"configured": False, "enabled": False, "service": "missing",
+                "error": "服务器尚未安装 Relay 组件，请先运行 sudo pdg update"}
+    result = sh([RELAY_CTL, "status", "--json"], timeout=30)
+    if result.returncode:
+        return {"configured": False, "enabled": False, "service": "error",
+                "error": (result.stdout + result.stderr).strip()[-400:]}
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError:
+        return {"configured": False, "enabled": False, "service": "error",
+                "error": "Relay 状态输出无法解析"}
+    return payload if isinstance(payload, dict) else {"error": "Relay 状态格式无效"}
+
+
+def _relay_profile():
+    if not os.path.exists(RELAY_CTL):
+        raise FileNotFoundError("服务器尚未安装 Relay 组件")
+    try:
+        result = subprocess.run([RELAY_CTL, "profile"], capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("生成 Relay 描述文件超时") from exc
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode("utf-8", "replace").strip()[-400:])
+    if not result.stdout:
+        raise RuntimeError("Relay 描述文件为空")
+    return result.stdout
+
+
+def _relay_page():
+    payload = _relay_status()
+    enabled = bool(payload.get("enabled"))
+    active = payload.get("service") == "active"
+    profile_ready = bool(payload.get("profile_ready"))
+    endpoint = str(payload.get("endpoint") or "未配置")
+    error = str(payload.get("error") or "")
+    text = ("🌐 <b>iOS 全设备 Network Relay</b>\n"
+            "全部域名流量经 Relay 进入现有 mihomo；分流、REJECT、共享 MITM 与 WLOC 继续复用。\n\n"
+            f"配置: <b>{'已启用' if enabled else '已关闭'}</b>\n"
+            f"服务: {'🟢 运行中' if active else '⚪ 未运行'}\n"
+            f"入口: <code>{endpoint}</code>\n"
+            "范围: 全域名（Relay 自身域名除外）\n"
+            "回退: 移除手机 Relay 描述文件后，旧 DoT/TPROXY 仍可用")
+    if error:
+        text += "\n\n⚠️ " + html.escape(error)
+    elif enabled and active and not profile_ready:
+        text += "\n\n⚠️ ChinaMax 直连 MRS 未就绪，请先更新规则库。"
+    rows = []
+    if enabled and active and profile_ready:
+        rows.append([{"text": "📱 发送全量 Relay 描述文件", "callback_data": "relay_profile"}])
+        rows.append([{"text": "⏹ 关闭 Relay 服务端入口", "callback_data": "relay_disable"}])
+    elif enabled and active:
+        rows.append([{"text": "⏹ 关闭 Relay 服务端入口", "callback_data": "relay_disable"}])
+    else:
+        rows.append([{"text": "▶️ 启用 Relay 服务端入口", "callback_data": "relay_enable"}])
+    rows.extend([[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                 [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+    return text, {"inline_keyboard": rows}
+
 def _wloc_ca_der():
     if not os.path.exists(WLOC_CA):
         raise FileNotFoundError("共享 MITM CA 尚未生成")
@@ -3592,6 +3728,52 @@ def handle_cb(chat, mid, data, cb_id=None):
              "分流规则、故障组、默认出口里的引用会一并同步。/cancel 取消。", EXIT_BACK); return
     if data == "setfinal":
         edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()), EXIT_BACK)); return
+    if data == "relay":
+        text, keyboard = _relay_page()
+        edit(chat, mid, text, keyboard); return
+    if data == "relay_enable":
+        edit(chat, mid, "⏳ 正在准备全量 Relay 入口（首次需下载并校验 Envoy）…",
+             {"inline_keyboard": [[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}]]})
+        def _relay_enable():
+            result = sh([RELAY_CTL, "enable"], timeout=600)
+            text, keyboard = _relay_page()
+            prefix = "✅ Relay 服务端入口已启用。\n\n" if result.returncode == 0 \
+                else "❌ 启用失败: " + html.escape((result.stdout + result.stderr).strip()[-500:]) + "\n\n"
+            edit(chat, mid, prefix + text, keyboard)
+        run_bg(_relay_enable); return
+    if data == "relay_profile":
+        edit(chat, mid, "正在生成全量 Relay 描述文件…",
+             {"inline_keyboard": [[{"text": "⬅️ 返回 Relay", "callback_data": "relay"}]]})
+        def _relay_send_profile():
+            try:
+                send_document(
+                    chat, "PrivDNS-Full-Relay.mobileconfig", _relay_profile(),
+                    "🌐 iOS/iPadOS 全设备 Network Relay\n"
+                    "安装后，除 Relay 自身域名外全部域名流量经 KFC → mihomo。\n"
+                    "已有共享 MITM CA 继续使用，无需安装新的 CA；需要去广告/WLOC 时保持它受信任。")
+                text, keyboard = _relay_page()
+                edit(chat, mid, "✅ 全量 Relay 描述文件已发送。\n\n" + text, keyboard)
+            except Exception as exc:  # noqa: BLE001
+                text, keyboard = _relay_page()
+                edit(chat, mid, "❌ 生成失败: " + html.escape(str(exc)) + "\n\n" + text, keyboard)
+        run_bg(_relay_send_profile); return
+    if data == "relay_disable":
+        edit(chat, mid,
+             "确认停止服务端 Relay 入口？\n请先从 iPhone 移除『PrivDNS 全量 Relay』描述文件，"
+             "否则手机可能暂时无法联网。旧 DoT/TPROXY、MITM 与 WLOC 配置不会删除。",
+             {"inline_keyboard": [
+                 [{"text": "确认关闭 Relay", "callback_data": "relay_disable_yes"}],
+                 [{"text": "⬅️ 取消", "callback_data": "relay"}]]}); return
+    if data == "relay_disable_yes":
+        edit(chat, mid, "⏳ 正在关闭 Relay 入口并清理专用 TPROXY…",
+             {"inline_keyboard": [[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}]]})
+        def _relay_disable():
+            result = sh([RELAY_CTL, "disable"], timeout=90)
+            text, keyboard = _relay_page()
+            prefix = "✅ Relay 已关闭；旧链路未改动。\n\n" if result.returncode == 0 \
+                else "❌ 关闭失败: " + html.escape((result.stdout + result.stderr).strip()[-500:]) + "\n\n"
+            edit(chat, mid, prefix + text, keyboard)
+        run_bg(_relay_disable); return
     if data == "ios":
         state[chat] = "ios_ssid"
         edit(chat, mid, "📱 <b>生成 iOS 描述文件</b>\n"
@@ -3772,6 +3954,9 @@ def handle_text(chat, text, msg_id=None):
         if cmd == "/adblock":
             state.pop(chat, None)
             title, kb = _adblock_page(); send(chat, title, kb); return
+        if cmd == "/relay":
+            state.pop(chat, None)
+            title, kb = _relay_page(); send(chat, title, kb); return
         if cmd == "/ios":
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")

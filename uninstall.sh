@@ -3,14 +3,16 @@
 set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "请用 root 运行"; exit 1; }
 
-systemctl disable --now pdg-bot pdg-probe81 pdg-wloc mosdns mihomo pdg-rules-update.timer pdg-health.timer 2>/dev/null || true
-rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,pdg-wloc,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
+systemctl disable --now pdg-bot pdg-probe81 pdg-wloc pdg-relay mosdns mihomo pdg-rules-update.timer pdg-health.timer 2>/dev/null || true
+rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,pdg-wloc,pdg-relay,mosdns,mihomo,pdg-rules-update,pdg-health}.service \
       /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
       /etc/systemd/system/journald.conf.d/50-pdg.conf
 systemctl daemon-reload
 /usr/local/bin/pdg-mihomo-tproxy.sh down 2>/dev/null || true
+/usr/local/bin/pdg-relay-tproxy.sh down 2>/dev/null || true
 
 # 防火墙: 删本项目独立表 inet pdg(不碰 Docker/fail2ban 等其它表); 有备份则还原 /etc/nftables.conf
+command -v nft >/dev/null 2>&1 && nft delete table inet pdg_relay 2>/dev/null || true
 command -v nft >/dev/null 2>&1 && nft delete table inet pdg 2>/dev/null || true
 if [[ -e /etc/nftables.conf.pdg-orig ]]; then
   mv -f /etc/nftables.conf.pdg-orig /etc/nftables.conf
@@ -25,13 +27,15 @@ elif [[ -e /run/systemd/resolve/stub-resolv.conf ]]; then
 fi
 
 echo "已停止并移除 systemd 单元、防火墙表(inet pdg)、并尽量还原 DNS。"
-echo "保留: /etc/mosdns /etc/mihomo /opt/pdg-bot /var/lib/pdg-wloc(CA) 与 Let's Encrypt 证书。"
+echo "保留: /etc/mosdns /etc/mihomo /etc/pdg-relay /opt/pdg-bot /opt/pdg-relay /var/lib/pdg-wloc(CA) 与 Let's Encrypt 证书。"
 
 if [[ "${1:-}" == "--purge" ]]; then
   echo "[--purge] 删除配置与数据…"
-  rm -rf /etc/mosdns /etc/mihomo /opt/pdg-bot /etc/privdns-gateway /var/lib/pdg-wloc   # 含 bot.env/token 与共享 MITM CA
+  rm -rf /etc/mosdns /etc/mihomo /etc/pdg-relay /opt/pdg-bot /opt/pdg-relay /etc/privdns-gateway /var/lib/pdg-wloc   # 含 bot.env/Relay token 与共享 MITM CA
   userdel pdg-wloc 2>/dev/null || true
+  userdel pdg-relay 2>/dev/null || true
   rm -f /usr/local/bin/mosdns /usr/local/bin/mihomo /usr/local/bin/pdg-mihomo-tproxy.sh \
+        /usr/local/bin/pdg-relay-tproxy.sh /usr/local/bin/pdg-relayctl \
         /usr/local/bin/pdg /usr/local/bin/pdg-set-token \
         /usr/local/bin/proxy-gateway-open-cert-http.sh \
         /usr/local/bin/proxy-gateway-restore-firewall.sh \
