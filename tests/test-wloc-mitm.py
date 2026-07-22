@@ -76,8 +76,8 @@ def extract_locations(body):
 
 
 body = fixture_body()
-patched, stats = wloc.patch_wloc_body(body, latitude=-33.8688, longitude=151.2093, accuracy=25)
-assert extract_locations(patched) == [(-33.8688, 151.2093, 25), (-33.8688, 151.2093, 25)]
+patched, stats = wloc.patch_wloc_body(body, latitude=-33.8688, longitude=151.2093)
+assert extract_locations(patched) == [(-33.8688, 151.2093, 99), (-33.8688, 151.2093, 88)]
 assert stats == {"wifi": 1, "cell": 1, "locations": 2, "skipped": 0}, stats
 
 
@@ -110,8 +110,8 @@ with tempfile.TemporaryDirectory() as td:
     flow = Flow(body)
     addon.response(flow)
     assert extract_locations(flow.response.content) == [
-        (35.681236, 139.767125, 30),
-        (35.681236, 139.767125, 30),
+        (35.681236, 139.767125, 99),
+        (35.681236, 139.767125, 88),
     ]
     assert "content-length" not in flow.response.headers
 

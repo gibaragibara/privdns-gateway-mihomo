@@ -572,7 +572,7 @@ def _wloc_page():
         label = str(config.get("label") or "").strip()
         target = ((f"<b>{_esc(label)}</b>  " if label else "")
                   + f"<code>{_wloc_format(config['latitude'])},"
-                  f"{_wloc_format(config['longitude'])}</code> (±{config['accuracy']}m)")
+                  f"{_wloc_format(config['longitude'])}</code>（保留 Apple 原始精度）")
     else:
         target = "未设置"
     text = ("📍 <b>iOS WLOC 虚拟定位</b>\n"
@@ -1343,7 +1343,7 @@ def set_wloc(latitude, longitude, accuracy=25, label=None):
         if _wloc_active(previous):
             return True, (f"✅ WLOC 目标已更新为 "
                           f"{display_label}{_wloc_format(lat)}, {_wloc_format(lon)} "
-                          f"(±{acc}m)，mosdns/mihomo 未重启")
+                          "（保留 Apple 原始精度），mosdns/mihomo 未重启")
 
         ok, msg = apply_sb(lambda c: None)  # add local HTTP outbound + exact-domain rules first
         if not ok:
@@ -1355,7 +1355,7 @@ def set_wloc(latitude, longitude, accuracy=25, label=None):
             _wloc_restore_runtime(previous)
             return False, msg
         return True, (f"✅ WLOC 已开启: "
-                      f"{display_label}{_wloc_format(lat)}, {_wloc_format(lon)} (±{acc}m)\n"
+                      f"{display_label}{_wloc_format(lat)}, {_wloc_format(lon)}（保留 Apple 原始精度）\n"
                       "仅 gs-loc.apple.com / gs-loc-cn.apple.com 进入 MITM")
 
 def disable_wloc():

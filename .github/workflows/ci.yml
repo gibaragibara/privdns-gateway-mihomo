@@ -92,6 +92,9 @@ jobs:
       - name: "发布链路回归 (tag-only 安装/更新 + 文档版本)"
         run: bash tests/test-release-flow.sh
 
+      - name: "更新快照与精确回滚回归"
+        run: bash tests/test-update-rollback.sh
+
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 

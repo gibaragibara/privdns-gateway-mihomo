@@ -137,7 +137,7 @@ def encode_field(field_no, wire_type, value):
     raise WlocFormatError(f"cannot encode protobuf wire type {wire_type}")
 
 
-def _patch_location(data, latitude, longitude, accuracy, stats):
+def _patch_location(data, latitude, longitude, stats):
     fields = parse_fields(data)
     has_lat = any(f.field_no == 1 and f.wire_type == 0 for f in fields)
     has_lon = any(f.field_no == 2 and f.wire_type == 0 for f in fields)
@@ -149,15 +149,16 @@ def _patch_location(data, latitude, longitude, accuracy, stats):
             out.append(encode_field(1, 0, round(latitude * 100_000_000)))
         elif field.field_no == 2 and field.wire_type == 0:
             out.append(encode_field(2, 0, round(longitude * 100_000_000)))
-        elif field.field_no == 3 and field.wire_type == 0:
-            out.append(encode_field(3, 0, accuracy))
         else:
+            # Preserve Apple's reported accuracy and every unknown field. A
+            # very precise value paired with a large coordinate jump can make
+            # iOS discard the network-location response as implausible.
             out.append(field.raw)
     stats["locations"] += 1
     return b"".join(out), True
 
 
-def _patch_wifi(data, latitude, longitude, accuracy, stats):
+def _patch_wifi(data, latitude, longitude, stats):
     fields = parse_fields(data)
     is_wifi = False
     for field in fields:
@@ -174,7 +175,7 @@ def _patch_wifi(data, latitude, longitude, accuracy, stats):
         if field.field_no == 2 and field.wire_type == 2:
             try:
                 patched, did_patch = _patch_location(
-                    field.value, latitude, longitude, accuracy, stats)
+                    field.value, latitude, longitude, stats)
                 out.append(encode_field(field.field_no, field.wire_type, patched))
                 changed = changed or did_patch
             except WlocFormatError:
@@ -187,7 +188,7 @@ def _patch_wifi(data, latitude, longitude, accuracy, stats):
     return b"".join(out), changed
 
 
-def _patch_cell(data, latitude, longitude, accuracy, stats):
+def _patch_cell(data, latitude, longitude, stats):
     fields = parse_fields(data)
     out = []
     changed = False
@@ -195,7 +196,7 @@ def _patch_cell(data, latitude, longitude, accuracy, stats):
         if field.field_no == 5 and field.wire_type == 2:
             try:
                 patched, did_patch = _patch_location(
-                    field.value, latitude, longitude, accuracy, stats)
+                    field.value, latitude, longitude, stats)
                 out.append(encode_field(field.field_no, field.wire_type, patched))
                 changed = changed or did_patch
             except WlocFormatError:
@@ -208,16 +209,16 @@ def _patch_cell(data, latitude, longitude, accuracy, stats):
     return b"".join(out), changed
 
 
-def _patch_payload(data, latitude, longitude, accuracy, stats):
+def _patch_payload(data, latitude, longitude, stats):
     fields = parse_fields(data)
     out = []
     before = stats["locations"]
     for field in fields:
         if field.field_no == 2 and field.wire_type == 2:
-            patched, _ = _patch_wifi(field.value, latitude, longitude, accuracy, stats)
+            patched, _ = _patch_wifi(field.value, latitude, longitude, stats)
             out.append(encode_field(field.field_no, field.wire_type, patched))
         elif field.field_no in (22, 24) and field.wire_type == 2:
-            patched, _ = _patch_cell(field.value, latitude, longitude, accuracy, stats)
+            patched, _ = _patch_cell(field.value, latitude, longitude, stats)
             out.append(encode_field(field.field_no, field.wire_type, patched))
         else:
             out.append(field.raw)
@@ -226,7 +227,7 @@ def _patch_payload(data, latitude, longitude, accuracy, stats):
     return b"".join(out)
 
 
-def _patch_frame(data, base, latitude, longitude, accuracy):
+def _patch_frame(data, base, latitude, longitude):
     if base < 0 or len(data) < base + 10:
         raise WlocFormatError("WLOC frame too short")
     size = int.from_bytes(data[base + 8:base + 10], "big")
@@ -234,7 +235,7 @@ def _patch_frame(data, base, latitude, longitude, accuracy):
         raise WlocFormatError("invalid WLOC frame length")
     stats = _new_stats()
     payload = data[base + 10:base + 10 + size]
-    patched = _patch_payload(payload, latitude, longitude, accuracy, stats)
+    patched = _patch_payload(payload, latitude, longitude, stats)
     if len(patched) > 0xFFFF:
         raise WlocFormatError("patched WLOC payload too large")
     body = (data[:base + 8] + len(patched).to_bytes(2, "big") + patched
@@ -242,7 +243,7 @@ def _patch_frame(data, base, latitude, longitude, accuracy):
     return body, stats
 
 
-def _patch_plain_body(data, latitude, longitude, accuracy):
+def _patch_plain_body(data, latitude, longitude):
     if len(data) < 10:
         raise WlocFormatError("WLOC response too short")
     preferred = list(range(0, 18, 2))
@@ -250,34 +251,31 @@ def _patch_plain_body(data, latitude, longitude, accuracy):
     preferred.extend(i for i in range(limit + 1) if i not in preferred)
     for base in preferred:
         try:
-            return _patch_frame(data, base, latitude, longitude, accuracy)
+            return _patch_frame(data, base, latitude, longitude)
         except WlocFormatError:
             pass
     for base in range(min(256, len(data)) + 1):
         stats = _new_stats()
         try:
-            patched = _patch_payload(data[base:], latitude, longitude, accuracy, stats)
+            patched = _patch_payload(data[base:], latitude, longitude, stats)
             return data[:base] + patched, stats
         except WlocFormatError:
             pass
     raise WlocFormatError("no patchable WLOC payload found")
 
 
-def patch_wloc_body(data, latitude, longitude, accuracy=25):
+def patch_wloc_body(data, latitude, longitude):
     latitude = float(latitude)
     longitude = float(longitude)
-    accuracy = int(accuracy)
     if not math.isfinite(latitude) or not -90 <= latitude <= 90:
         raise ValueError("latitude outside -90..90")
     if not math.isfinite(longitude) or not -180 <= longitude <= 180:
         raise ValueError("longitude outside -180..180")
-    if not 1 <= accuracy <= 1000:
-        raise ValueError("accuracy outside 1..1000")
     raw = bytes(data)
     if raw.startswith(b"\x1f\x8b"):
-        patched, stats = _patch_plain_body(gzip.decompress(raw), latitude, longitude, accuracy)
+        patched, stats = _patch_plain_body(gzip.decompress(raw), latitude, longitude)
         return gzip.compress(patched, mtime=0), stats
-    return _patch_plain_body(raw, latitude, longitude, accuracy)
+    return _patch_plain_body(raw, latitude, longitude)
 
 
 def _load_config(path):
@@ -288,14 +286,11 @@ def _load_config(path):
             return None
         latitude = float(config["latitude"])
         longitude = float(config["longitude"])
-        accuracy = int(config.get("accuracy", 25))
         if not math.isfinite(latitude) or not -90 <= latitude <= 90:
             return None
         if not math.isfinite(longitude) or not -180 <= longitude <= 180:
             return None
-        if not 1 <= accuracy <= 1000:
-            return None
-        return latitude, longitude, accuracy
+        return latitude, longitude
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
         return None
 

@@ -32,7 +32,7 @@ WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若去广
 
 ## 添加常用地点
 
-常用地点保存在服务器 `/etc/privdns-gateway/wloc-presets.json`，Bot 每次打开 WLOC 页面都会重新读取，无需重启。每项需要唯一短 ID、显示名称、WGS84 纬度/经度和精度：
+常用地点保存在服务器 `/etc/privdns-gateway/wloc-presets.json`，Bot 每次打开 WLOC 页面都会重新读取，无需重启。每项需要唯一短 ID、显示名称和 WGS84 纬度/经度。旧配置中的 `accuracy` 字段仅为兼容保留，WLOC 不会把它写入 Apple 的响应，始终保留 Apple 原始精度：
 
 ```json
 {
@@ -41,22 +41,19 @@ WLOC 开启时只有上述两个 Apple 精确域名进入共享 MITM。若去广
       "id": "p001",
       "name": "香港西九龙站",
       "latitude": 22.303611,
-      "longitude": 114.165,
-      "accuracy": 25
+      "longitude": 114.165
     },
     {
       "id": "p002",
       "name": "东京涩谷站",
       "latitude": 35.658514,
-      "longitude": 139.70133,
-      "accuracy": 25
+      "longitude": 139.70133
     },
     {
       "id": "p003",
       "name": "日本横滨站",
       "latitude": 35.46583,
-      "longitude": 139.62278,
-      "accuracy": 25
+      "longitude": 139.62278
     }
   ]
 }

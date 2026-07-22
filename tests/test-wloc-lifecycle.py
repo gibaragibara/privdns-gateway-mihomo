@@ -46,8 +46,8 @@ assert "systemctl try-restart pdg-wloc" in pdg, (
 assert "systemctl restart pdg-wloc" in pdg, (
     "pdg update must restart an enabled sidecar to load the new addon"
 )
-assert pdg.count("cmd_rollback 0; return 1") >= 6, (
-    "WLOC dependency and migration failures must use the update rollback path"
+assert pdg.count('cmd_rollback "${rollback_args[@]}"') >= 6, (
+    "WLOC dependency and migration failures must use the exact update rollback path"
 )
 
 for marker in ("pdg-wloc", "/var/lib/pdg-wloc", "userdel pdg-wloc"):

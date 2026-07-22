@@ -406,53 +406,163 @@ PY
 }
 
 SNAP_DIR="/var/lib/privdns-gateway/backups"
+_PDG_SNAP_CREATED=""
+
+_pdg_wait_active(){
+  local service="$1" attempts="${2:-6}" attempt
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    [[ "$(systemctl is-active "$service" 2>/dev/null)" == active ]] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+_pdg_apply_snapshot_tree(){
+  local tree="$1" archive="$2"
+  tar -C "$tree" -cf "$archive" . && tar -xf "$archive" -C /
+}
 
 cmd_snapshot(){
   need_root snapshot; _lock
-  local ts d; local -a paths
+  _PDG_SNAP_CREATED=""
+  local ts d archive temporary path
+  local -a candidates items
   ts=$(date +%Y%m%d-%H%M%S); d="$SNAP_DIR/$ts"
-  install -d -m700 "$d"
-  # 整机配置 + 防火墙 + bot.env(含 token)+ service(相对 / 打包, 回滚直接 -C / 解开)
-  paths=(etc/mosdns etc/mihomo opt/pdg-bot etc/privdns-gateway
-         etc/nftables.conf etc/systemd/system/pdg-bot.service)
-  [[ -d /var/lib/pdg-wloc ]] && paths+=(var/lib/pdg-wloc)
-  [[ -f /etc/systemd/system/pdg-wloc.service ]] && paths+=(etc/systemd/system/pdg-wloc.service)
-  tar czf "$d/snap.tar.gz" -C / "${paths[@]}" 2>/dev/null
-  chmod 600 "$d/snap.tar.gz"
-  echo "✅ 快照: $d/snap.tar.gz"
+  install -d -m700 "$d" || { c_y "❌ 无法创建快照目录"; return 1; }
+  # Include every file an update can replace, not only live configuration. A
+  # rollback must restore the old program, unit files, and certificate hooks too.
+  candidates=(
+    etc/mosdns etc/mihomo etc/privdns-gateway etc/nftables.conf
+    opt/pdg-bot opt/privdns-gateway var/lib/pdg-wloc
+    etc/systemd/system/pdg-bot.service
+    etc/systemd/system/pdg-probe81.service
+    etc/systemd/system/pdg-wloc.service
+    etc/systemd/system/mosdns.service
+    etc/systemd/system/mihomo.service
+    etc/systemd/system/pdg-rules-update.service
+    etc/systemd/system/pdg-rules-update.timer
+    etc/systemd/system/pdg-health.service
+    etc/systemd/system/pdg-health.timer
+    etc/systemd/system/journald.conf.d/50-pdg.conf
+    etc/systemd/journald.conf.d/50-pdg.conf
+    etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
+    usr/local/bin/pdg
+    usr/local/bin/pdg-set-token
+    usr/local/bin/pdg-mihomo-tproxy.sh
+    usr/local/bin/proxy-gateway-open-cert-http.sh
+    usr/local/bin/proxy-gateway-restore-firewall.sh
+  )
+  for path in "${candidates[@]}"; do
+    [[ -e "/$path" ]] && items+=("$path")
+  done
+  [[ ${#items[@]} -gt 0 ]] || { c_y "❌ 没有可快照的 PrivDNS 文件"; rmdir "$d" 2>/dev/null; return 1; }
+  archive="$d/snap.tar.gz"; temporary="$archive.tmp"
+  if ! tar czf "$temporary" -C / "${items[@]}" 2>/dev/null \
+      || [[ ! -s "$temporary" ]] \
+      || ! chmod 600 "$temporary" \
+      || ! mv -f "$temporary" "$archive"; then
+    c_y "❌ 快照打包失败"
+    rm -f "$temporary" "$archive"; rmdir "$d" 2>/dev/null
+    return 1
+  fi
+  _PDG_SNAP_CREATED="$d"
+  echo "✅ 快照: $archive"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
 }
 
 cmd_rollback(){
   need_root rollback; _lock
-  local snaps; mapfile -t snaps < <(ls -1dt "$SNAP_DIR"/*/ 2>/dev/null)
-  [[ ${#snaps[@]} -gt 0 ]] || { echo "没有快照(先 pdg snapshot)"; return 1; }
-  echo "可用快照(新→旧):"; local i=0; for s in "${snaps[@]}"; do echo "  [$i] $(basename "$s")"; i=$((i+1)); done
-  local idx="${1:-0}" target
-  [[ "$idx" =~ ^[0-9]+$ ]] || { echo "无效序号 $idx"; return 1; }
-  idx=$((10#$idx))
-  (( idx >= ${#snaps[@]} )) && { echo "无效序号 $idx"; return 1; }
-  target="${snaps[$idx]}"
-  local f="$target/snap.tar.gz"
-  [[ -f "$f" ]] || { echo "快照文件缺失: $f"; return 1; }
-  # 先校验快照里的 mihomo / nft 再动手。
-  local tmp; tmp=$(mktemp -d); tar xzf "$f" -C "$tmp"
-  if [[ -f "$tmp/etc/mihomo/config.yaml" ]]; then
-    mihomo -t -d "$tmp/etc/mihomo" >/dev/null 2>&1 || { echo "❌ 快照的 mihomo 配置 test 失败, 中止"; rm -rf "$tmp"; return 1; }
+  local idx="" dir="" git_ref="" target f tmp tree members restore_archive
+  local i path
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir)
+        [[ $# -ge 2 && -n "${2:-}" ]] || { echo "--dir 缺少快照目录"; return 1; }
+        dir="$2"; shift 2;;
+      --git)
+        [[ $# -ge 2 && -n "${2:-}" ]] || { echo "--git 缺少提交引用"; return 1; }
+        git_ref="$2"; shift 2;;
+      *)
+        [[ -z "$idx" ]] || { echo "只接受一个快照序号"; return 1; }
+        idx="$1"; shift;;
+    esac
+  done
+  if [[ -n "$dir" ]]; then
+    target="$dir"
+    [[ -d "$target" ]] || { echo "指定快照目录不存在: $target"; return 1; }
+  else
+    local snaps; mapfile -t snaps < <(ls -1dt "$SNAP_DIR"/*/ 2>/dev/null)
+    [[ ${#snaps[@]} -gt 0 ]] || { echo "没有快照(先 pdg snapshot)"; return 1; }
+    echo "可用快照(新→旧):"; i=0; for path in "${snaps[@]}"; do echo "  [$i] $(basename "$path")"; i=$((i+1)); done
+    idx="${idx:-0}"
+    [[ "$idx" =~ ^[0-9]+$ ]] || { echo "无效序号 $idx"; return 1; }
+    idx=$((10#$idx))
+    (( idx >= ${#snaps[@]} )) && { echo "无效序号 $idx"; return 1; }
+    target="${snaps[$idx]}"
   fi
-  [[ -f "$tmp/etc/nftables.conf" ]] && { nft -c -f "$tmp/etc/nftables.conf" >/dev/null 2>&1 || { echo "❌ 快照的 nftables 语法错, 中止"; rm -rf "$tmp"; return 1; }; }
-  rm -rf "$tmp"
+  f="$target/snap.tar.gz"
+  [[ -f "$f" ]] || { echo "快照文件缺失: $f"; return 1; }
+  # Read and validate the archive into a temporary tree before touching the
+  # running system. Only project-owned paths may be restored.
+  tmp=$(mktemp -d) || { echo "❌ 无法创建回滚临时目录"; return 1; }
+  tree="$tmp/tree"; members="$tmp/members"; restore_archive="$tmp/restore.tar"
+  if ! mkdir -p "$tree" \
+      || ! tar tzf "$f" > "$members" 2>/dev/null \
+      || [[ ! -s "$members" ]]; then
+    echo "❌ 快照目录或成员清单读取失败, 中止"; rm -rf "$tmp"; return 1
+  fi
+  if grep -Eq '(^/|(^|/)\.\.(/|$))' "$members" \
+      || grep -Evq '^(etc|opt|usr/local/bin|var/lib/pdg-wloc)(/|$)' "$members"; then
+    echo "❌ 快照含越界或非 PrivDNS 路径, 中止"; rm -rf "$tmp"; return 1
+  fi
+  if ! tar xzf "$f" -C "$tree" 2>/dev/null; then
+    echo "❌ 快照解包失败, 中止"; rm -rf "$tmp"; return 1
+  fi
+  if [[ -f "$tree/etc/mihomo/config.yaml" ]]; then
+    mihomo -t -d "$tree/etc/mihomo" -f "$tree/etc/mihomo/config.yaml" >/dev/null 2>&1 \
+      || { echo "❌ 快照的 mihomo 配置 test 失败, 中止"; rm -rf "$tmp"; return 1; }
+  fi
+  [[ -f "$tree/etc/nftables.conf" ]] \
+    && { nft -c -f "$tree/etc/nftables.conf" >/dev/null 2>&1 \
+      || { echo "❌ 快照的 nftables 语法错, 中止"; rm -rf "$tmp"; return 1; }; }
   echo "回滚到 $(basename "$target") …"
-  tar xzf "$f" -C /
+  if ! _pdg_apply_snapshot_tree "$tree" "$restore_archive"; then
+    echo "❌ 快照落盘失败，系统可能处于部分恢复状态"; rm -rf "$tmp"; return 1
+  fi
+  rm -rf "$tmp"
   systemctl daemon-reload
-  nft -f /etc/nftables.conf 2>/dev/null || true
-  systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
+  local -a unrestored=()
+  if [[ -f /etc/nftables.conf ]] && ! nft -f /etc/nftables.conf >/dev/null 2>&1; then
+    unrestored+=(nftables)
+  fi
+  if ! systemctl restart mosdns >/dev/null 2>&1 || ! _pdg_wait_active mosdns; then
+    unrestored+=(mosdns)
+  fi
+  if ! systemctl restart mihomo >/dev/null 2>&1 || ! _pdg_wait_active mihomo; then
+    unrestored+=(mihomo)
+  fi
+  systemctl try-restart pdg-bot pdg-probe81 >/dev/null 2>&1 || unrestored+=(bot_or_probe)
   if jq -e '.enabled == true' /var/lib/pdg-wloc/wloc.json >/dev/null 2>&1 \
     || { jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1 \
          && jq -e '.stats.host_count > 0' /var/lib/pdg-wloc/adblock-rules.json >/dev/null 2>&1; }; then
-    systemctl enable --now pdg-wloc 2>/dev/null || true
+    if ! systemctl reset-failed pdg-wloc >/dev/null 2>&1 \
+        || ! systemctl enable --now pdg-wloc >/dev/null 2>&1 \
+        || ! _pdg_wait_active pdg-wloc; then
+      unrestored+=(pdg-wloc)
+    fi
   else
-    systemctl disable --now pdg-wloc 2>/dev/null || true
+    systemctl disable --now pdg-wloc >/dev/null 2>&1 || unrestored+=(pdg-wloc)
+  fi
+  if [[ -n "$git_ref" ]]; then
+    if [[ -d "$REPO_DIR/.git" ]] && git -C "$REPO_DIR" reset --hard -q "$git_ref" 2>/dev/null; then
+      c_g "  仓库已复位到 ${git_ref:0:12}"
+    else
+      unrestored+=(repository_git)
+    fi
+  fi
+  if [[ ${#unrestored[@]} -gt 0 ]]; then
+    c_y "⚠️ 已恢复快照，但以下项目未完全恢复: ${unrestored[*]}"
+    return 1
   fi
   echo "✅ 已回滚并重启服务"
 }
@@ -464,21 +574,47 @@ cmd_update(){
     [[ -d "$REPO_DIR/.git" ]] && pdg_fetch_release_tags "$REPO_DIR" 2>/dev/null
     local tgt; tgt=$(git -C "$REPO_DIR" tag -l 'v*' --sort=-v:refname 2>/dev/null | head -1)
     echo "当前: $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)   最新发布: ${tgt:-(无 tag)}"
+    local current
+    current=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)
+    if [[ -n "$current" && -n "$tgt" ]] \
+        && ! git -C "$REPO_DIR" merge-base --is-ancestor "$current" "$tgt" 2>/dev/null; then
+      c_y "⚠️ 最新 tag 不是当前代码的后继版本；拒绝自动降级。请先发布当前代码的新版 tag。"
+    fi
     [[ -n "$tgt" ]] && { echo "待更新提交(HEAD..$tgt):"; git -C "$REPO_DIR" log --oneline "HEAD..$tgt" 2>/dev/null || echo "  (已是最新或无法比较)"; }
     return 0
   fi
-  _lock   # 取锁(嵌套的 cmd_snapshot 不会重复锁)
-  c_g "更新前留快照…"; cmd_snapshot >/dev/null 2>&1 || true
+  _lock
   c_g "拉取最新发布 tag…"
   [[ -d "$REPO_DIR/.git" ]] || { rm -rf "$REPO_DIR"; git clone -q "$REPO_URL" "$REPO_DIR"; }
   if ! pdg_fetch_release_tags "$REPO_DIR"; then
     c_y "拉取发布 tag 失败, 中止更新。"; return 1
   fi
-  local tgt; tgt=$(git -C "$REPO_DIR" tag -l 'v*' --sort=-v:refname | head -1)
+  local tgt pre_sha snap_dir
+  tgt=$(git -C "$REPO_DIR" tag -l 'v*' --sort=-v:refname | head -1)
   if [[ -z "$tgt" ]]; then
     c_y "仓库没有发布 tag(v*), 中止更新。"; return 1
   fi
-  git -C "$REPO_DIR" reset --hard -q "$tgt"
+  pre_sha=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null) \
+    || { c_y "无法读取当前代码提交，拒绝更新。"; return 1; }
+  if ! git -C "$REPO_DIR" merge-base --is-ancestor "$pre_sha" "$tgt" 2>/dev/null; then
+    c_y "最新发布 $tgt 不是当前 ${pre_sha:0:12} 的后继版本，拒绝自动降级。"
+    c_y "请先完成当前代码的测试并发布新的 v* tag，再运行 pdg update。"
+    return 1
+  fi
+  _PDG_SNAP_CREATED=""
+  c_g "更新前留快照…"
+  if ! cmd_snapshot >/dev/null 2>&1 \
+      || [[ -z "$_PDG_SNAP_CREATED" || ! -s "$_PDG_SNAP_CREATED/snap.tar.gz" ]]; then
+    c_y "❌ 更新前快照失败，拒绝在无法精确回滚的前提下继续。"
+    return 1
+  fi
+  snap_dir="$_PDG_SNAP_CREATED"
+  local -a rollback_args=(--dir "$snap_dir" --git "$pre_sha")
+  if ! git -C "$REPO_DIR" reset --hard -q "$tgt"; then
+    c_y "切换到发布 $tgt 失败，回滚到更新前快照…"
+    cmd_rollback "${rollback_args[@]}"
+    return 1
+  fi
   c_g "→ 已切到发布 $tgt"
   c_g "刷新代码(配置/出口/token/证书均不动)…"
   install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py
@@ -495,7 +631,7 @@ cmd_update(){
     c_g "安装共享 MITM sidecar 依赖 mitmproxy…"
     if ! apt-get update -qq \
       || ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mitmproxy >/dev/null; then
-      c_y "mitmproxy 安装失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+      c_y "mitmproxy 安装失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
     fi
   fi
   id -u pdg-wloc >/dev/null 2>&1 || useradd --system --home-dir /var/lib/pdg-wloc --shell /usr/sbin/nologin pdg-wloc
@@ -520,15 +656,15 @@ cmd_update(){
   if ! python3 /opt/pdg-bot/sync_adblock.py \
       --sources /etc/privdns-gateway/adblock-sources.json \
       --merge-defaults "$REPO_DIR"/deploy/mitm/adblock-sources.json --merge-only; then
-    c_y "去广告规则源迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "去广告规则源迁移失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   if ! python3 /opt/pdg-bot/sync_adblock.py \
       --sources /etc/privdns-gateway/adblock-sources.json --pin-missing-modules; then
-    c_y "现有 MITM 插件初始 SHA256 固定失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "现有 MITM 插件初始 SHA256 固定失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   install -m644 "$REPO_DIR"/deploy/wloc/pdg-wloc.service    /etc/systemd/system/
   if ! python3 /opt/pdg-bot/migrate_wloc.py /etc/mosdns/config.yaml; then
-    c_y "mosdns 共享 MITM 分支迁移失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "mosdns 共享 MITM 分支迁移失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
@@ -551,7 +687,7 @@ cmd_update(){
 
   if jq -e '.enabled == true' /var/lib/pdg-wloc/adblock.json >/dev/null 2>&1; then
     if ! python3 /opt/pdg-bot/sync_adblock.py; then
-      c_y "去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+      c_y "去广告规则同步失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
     fi
   fi
   if ! python3 - <<'PY'
@@ -564,19 +700,19 @@ bot._wloc_write_domains(bot._wloc_active())
 bot._adblock_write_domains(bot._adblock_active())
 PY
   then
-    c_y "共享 MITM 路由渲染失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "共享 MITM 路由渲染失败, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
   if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
-    c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
-    c_y "mihomo 配置 test 失败, 回滚…"; cmd_rollback 0; return 1
+    c_y "mihomo 配置 test 失败, 回滚…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then
-    c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
+    c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
   systemctl daemon-reload
   systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
@@ -585,20 +721,24 @@ PY
          && jq -e '.stats.host_count > 0' /var/lib/pdg-wloc/adblock-rules.json >/dev/null 2>&1; }; then
     systemctl enable pdg-wloc >/dev/null 2>&1 || true
     if ! systemctl restart pdg-wloc \
-      || [[ "$(systemctl is-active pdg-wloc 2>/dev/null)" != "active" ]]; then
-      c_y "共享 MITM 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+      || ! _pdg_wait_active pdg-wloc; then
+      c_y "共享 MITM 更新后起不来, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
     fi
   else
     systemctl disable --now pdg-wloc >/dev/null 2>&1 || true
   fi
-  systemctl restart mosdns mihomo pdg-bot pdg-probe81 2>/dev/null || true
-  sleep 2
+  if ! systemctl restart mosdns mihomo 2>/dev/null \
+      || ! _pdg_wait_active mosdns \
+      || ! _pdg_wait_active mihomo; then
+    c_y "核心服务更新后未稳定运行, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
+  fi
+  systemctl try-restart pdg-bot pdg-probe81 >/dev/null 2>&1 || true
 
   # token 是否已配置(未配则 pdg-bot 不在跑属正常, 不据此回滚)
   local token_set=0
   [[ -f "$ENVF" ]] && grep -qE '^PDG_BOT_TOKEN=.+' "$ENVF" && grep -qE '^PDG_BOT_ALLOWED=.+' "$ENVF" && token_set=1
   if [[ "$token_set" == 1 && "$(systemctl is-active pdg-bot 2>/dev/null)" != "active" ]]; then
-    c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+    c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback "${rollback_args[@]}"; return 1
   fi
 
   # doctor 自检: 有 fail 回滚, warn 仅提示 (未配 token 时把"服务: 未运行: pdg-bot"这单一项排除, 避免误判)
@@ -612,7 +752,7 @@ PY
     if [[ "${fails:-0}" -gt 0 ]]; then
       c_y "自检发现 $fails 项失败, 回滚到更新前快照:"
       echo "$j" | jq -r '.[] | select(.level=="fail") | "  ❌ \(.check): \(.detail)"'
-      cmd_rollback 0; return 1
+      cmd_rollback "${rollback_args[@]}"; return 1
     fi
     [[ "${warns:-0}" -gt 0 ]] && { c_y "自检有 $warns 项警告(不回滚, 仅提示):"
       echo "$j" | jq -r '.[] | select(.level=="warn") | "  ⚠️ \(.check): \(.detail)"'; }
@@ -650,13 +790,19 @@ cmd_detect_cidr(){
   [[ "$det" == "$cur" ]] && { c_g "✅ 与当前一致, 无需改动。"; return 0; }
   read -rp "把内网卡段 ${cur:-?} → $det 并应用(写 mosdns+nftables 并重启)? [y/N]: " yn
   [[ "$yn" == [yY] ]] || { echo "已取消, 未改动。"; return 0; }
-  _lock; c_g "先留快照…"; cmd_snapshot >/dev/null 2>&1 || true
+  _lock; _PDG_SNAP_CREATED=""; c_g "先留快照…"
+  if ! cmd_snapshot >/dev/null 2>&1 \
+      || [[ -z "$_PDG_SNAP_CREATED" || ! -s "$_PDG_SNAP_CREATED/snap.tar.gz" ]]; then
+    c_y "快照失败，拒绝修改内网卡段。"
+    return 1
+  fi
+  local snap_dir="$_PDG_SNAP_CREATED"
   [[ -n "$cur" ]] && sed -i "s#${cur//./\\.}#$det#g" /etc/nftables.conf
   sed -i -E "s#(ips:[[:space:]]*\[[[:space:]]*\")[0-9./]+(\")#\1$det\2#" /etc/mosdns/config.yaml
-  if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then c_y "nft 校验失败, 回滚…"; cmd_rollback 0; return 1; fi
+  if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then c_y "nft 校验失败, 回滚…"; cmd_rollback --dir "$snap_dir"; return 1; fi
   nft -f /etc/nftables.conf
   systemctl restart mosdns; sleep 2
-  [[ "$(systemctl is-active mosdns)" == active ]] || { c_y "mosdns 重启异常, 回滚…"; cmd_rollback 0; return 1; }
+  _pdg_wait_active mosdns || { c_y "mosdns 重启异常, 回滚…"; cmd_rollback --dir "$snap_dir"; return 1; }
   c_g "✅ 内网卡段已更新为 $det 并重启 mosdns。"
 }
 
