@@ -108,6 +108,7 @@ if grep -q '_PDG_SNAP_CREATED' "$script" \
     && grep -q 'usr/local/bin/pdg-set-token' "$script" \
     && grep -q '更新前快照失败，拒绝' "$script" \
     && grep -q 'merge-base --is-ancestor "\$pre_sha" "\$tgt"' "$script" \
+    && grep -q -- '--no-pager log --oneline' "$script" \
     && grep -q 'cmd_rollback "\${rollback_args\[@\]}"' "$script" \
     && grep -q 'relay_snapshot_present' "$script" \
     && grep -q 'rm -rf /etc/pdg-relay /opt/pdg-relay' "$script" \

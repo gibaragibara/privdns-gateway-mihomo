@@ -622,7 +622,7 @@ cmd_update(){
         && ! git -C "$REPO_DIR" merge-base --is-ancestor "$current" "$tgt" 2>/dev/null; then
       c_y "⚠️ 最新 tag 不是当前代码的后继版本；拒绝自动降级。请先发布当前代码的新版 tag。"
     fi
-    [[ -n "$tgt" ]] && { echo "待更新提交(HEAD..$tgt):"; git -C "$REPO_DIR" log --oneline "HEAD..$tgt" 2>/dev/null || echo "  (已是最新或无法比较)"; }
+    [[ -n "$tgt" ]] && { echo "待更新提交(HEAD..$tgt):"; git -C "$REPO_DIR" --no-pager log --oneline "HEAD..$tgt" 2>/dev/null || echo "  (已是最新或无法比较)"; }
     return 0
   fi
   _lock
