@@ -11,7 +11,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 mihomo 前备份, check 
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, contextlib, fcntl, hashlib, html, http.client, io, json, math, os, plistlib, pwd, re, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
+import base64, contextlib, fcntl, hashlib, html, http.client, io, json, math, os, plistlib, pwd, re, secrets, shutil, socket, ssl, subprocess, tarfile, tempfile, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
@@ -63,12 +63,17 @@ ADBLOCK_PRIVATE_RESOURCE_LIMIT = 128
 ADBLOCK_FETCH_WORKERS = 4
 ADBLOCK_COMPATIBILITY_LIMIT = 256
 ADBLOCK_PLUGIN_PAGE_SIZE = 10
+ADBLOCK_APPROVAL_TTL = 10 * 60
+ADBLOCK_APPROVAL_LIMIT = 256
+ADBLOCK_RULE_DIFF_LIMIT = 4
 CONFIG_LOCK_FILE = "/run/privdns-gateway.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
 _CONFIG_THREAD_LOCK = threading.RLock()
 _CONFIG_LOCAL = threading.local()
 _TELEGRAM_LOCAL = threading.local()
+_ADBLOCK_APPROVAL_LOCK = threading.Lock()
+_ADBLOCK_APPROVALS: dict[str, dict] = {}
 
 # ── Telegram (每个 worker 复用自己的 HTTPS 长连接) ──
 
@@ -322,6 +327,63 @@ def _adblock_source_config(strict=False):
                 raise ValueError(f"去广告来源配置中的 {key} 不是列表，已拒绝覆盖")
             config[key] = []
     return config
+
+
+def _adblock_config_generation(config):
+    """Stable revision used to bind an approval to its reviewed source set."""
+    encoded = json.dumps(config, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _adblock_prune_approvals(now):
+    expired = [token for token, item in _ADBLOCK_APPROVALS.items()
+               if item.get("expires_at", 0) <= now]
+    for token in expired:
+        _ADBLOCK_APPROVALS.pop(token, None)
+
+
+def _adblock_issue_approval(chat, actor, source_id, candidate_sha, generation):
+    if (not isinstance(chat, int) or not isinstance(actor, int)
+            or not re.fullmatch(r"[0-9a-f]{12}", str(source_id))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(candidate_sha))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(generation))):
+        return None
+    now = time.monotonic()
+    with _ADBLOCK_APPROVAL_LOCK:
+        _adblock_prune_approvals(now)
+        if len(_ADBLOCK_APPROVALS) >= ADBLOCK_APPROVAL_LIMIT:
+            oldest = sorted(_ADBLOCK_APPROVALS, key=lambda key:
+                            _ADBLOCK_APPROVALS[key].get("expires_at", 0))
+            overflow = len(_ADBLOCK_APPROVALS) - ADBLOCK_APPROVAL_LIMIT + 1
+            for stale in oldest[:overflow]:
+                _ADBLOCK_APPROVALS.pop(stale, None)
+        for _ in range(3):
+            token = secrets.token_urlsafe(18)
+            if token not in _ADBLOCK_APPROVALS:
+                _ADBLOCK_APPROVALS[token] = {
+                    "chat": chat,
+                    "actor": actor,
+                    "source_id": source_id,
+                    "candidate_sha": candidate_sha,
+                    "generation": generation,
+                    "expires_at": now + ADBLOCK_APPROVAL_TTL,
+                }
+                return token
+    return None
+
+
+def _adblock_consume_approval(token, chat, actor):
+    now = time.monotonic()
+    with _ADBLOCK_APPROVAL_LOCK:
+        _adblock_prune_approvals(now)
+        approval = _ADBLOCK_APPROVALS.get(token)
+        if not approval:
+            return None, "审批已失效或已使用；请重新查看候选差异"
+        if approval["chat"] != chat or approval["actor"] != actor:
+            return None, "审批上下文不匹配；请在原聊天中重新查看候选差异"
+        _ADBLOCK_APPROVALS.pop(token, None)
+    return approval, ""
 
 
 def _adblock_hostname(value):
@@ -659,6 +721,40 @@ def _adblock_page():
     rows.extend([[{"text": "📱 客户端", "callback_data": "nav:client"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
+
+
+def _adblock_pending_rule_diff_text(pending):
+    sections = []
+    for title, rules_key, count_key in (
+            ("新增规则", "added_rules", "added_rule_count"),
+            ("删除规则", "removed_rules", "removed_rule_count")):
+        try:
+            count = max(0, int(pending.get(count_key, 0) or 0))
+        except (TypeError, ValueError):
+            count = 0
+        rules = pending.get(rules_key, [])
+        if not isinstance(rules, list):
+            rules = []
+        shown = [rule for rule in rules[:ADBLOCK_RULE_DIFF_LIMIT]
+                 if isinstance(rule, dict)]
+        if not count:
+            continue
+        sections.append(f"{title}: {count} 条")
+        for rule in shown:
+            action = str(rule.get("action") or "unknown")[:80]
+            rule_hosts = rule.get("hosts", [])
+            if not isinstance(rule_hosts, list):
+                rule_hosts = []
+            hosts = ", ".join(str(host)[:80] for host in rule_hosts
+                              if isinstance(host, str))[:180] or "未声明主机"
+            pattern = str(rule.get("pattern") or "")[:160]
+            sections.append(f"• <code>{_esc(action)}</code> {_esc(hosts)}")
+            if pattern:
+                sections.append(f"  <code>{_esc(pattern)}</code>")
+        if count > len(shown):
+            sections.append(f"  其余 {count - len(shown)} 条未展开")
+    return ("\n".join(sections) + "\n") if sections else ""
+
 
 def _adblock_sources_page(page=0, pending_only=False):
     all_sources = _adblock_module_sources()
@@ -1631,17 +1727,23 @@ def add_adblock_plugin(url):
                       f"待匹配脚本转换 {detail.get('unported_scripts', 0)} 条")
 
 
-def approve_adblock_plugin_update(source_id):
+def approve_adblock_plugin_update(source_id, expected_sha=None, expected_generation=None):
     with _mitm_config_lock():
         pending = next((item for item in _adblock_rules().get("pending_updates", [])
                         if isinstance(item, dict)
                         and _adblock_source_id(item.get("url")) == source_id), None)
         if not pending:
             return False, "待批准更新不存在；请先同步规则"
+        expected = str(pending.get("sha256") or "").lower()
+        if expected_sha is not None and expected != expected_sha:
+            return False, "候选插件已变化；请重新查看新的差异"
         try:
             config = _adblock_source_config(strict=True)
         except ValueError as exc:
             return False, str(exc)
+        if (expected_generation is not None
+                and _adblock_config_generation(config) != expected_generation):
+            return False, "去广告来源配置已变化；请重新查看候选差异"
         source = next((item for item in config.get("sources", [])
                        if isinstance(item, dict)
                        and _adblock_source_id(item.get("url")) == source_id), None)
@@ -1651,7 +1753,6 @@ def approve_adblock_plugin_update(source_id):
         ok, detail = _adblock_check_plugin(url)
         if not ok:
             return False, detail
-        expected = str(pending.get("sha256") or "").lower()
         current = str(detail.get("sha256") or "").lower()
         if not re.fullmatch(r"[0-9a-f]{64}", current) or current != expected:
             return False, "远程插件在审批期间再次变化；请重新同步并检查新的差异"
@@ -3418,7 +3519,7 @@ def kb_pick_named(prefix, items, back=BACK):
     return {"inline_keyboard": rows}
 
 # ── 回调 (原地编辑) ──
-def handle_cb(chat, mid, data, cb_id=None):
+def handle_cb(chat, mid, data, cb_id=None, actor_id=None):
     # 对齐 5GPN-X: 同一消息上一项慢操作未完成时, 提示稍候, 不重复排队
     if is_busy(chat, mid) and data not in ("menu", "status") and not str(data).startswith("nav:"):
         if cb_id:
@@ -3527,6 +3628,17 @@ def handle_cb(chat, mid, data, cb_id=None):
         if not source or not pending:
             title, kb = _adblock_sources_page()
             edit(chat, mid, "待批准更新不存在；请先同步规则。\n\n" + title, kb); return
+        try:
+            generation = _adblock_config_generation(_adblock_source_config(strict=True))
+        except ValueError as exc:
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, "❌ " + str(exc) + "\n\n" + title, kb); return
+        candidate_sha = str(pending.get("sha256") or "").lower()
+        approval_token = _adblock_issue_approval(
+            chat, actor_id, source_id, candidate_sha, generation)
+        if not approval_token:
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, "❌ 审批会话无效；请重新打开待批准更新页面。\n\n" + title, kb); return
         added = pending.get("added_hosts", [])
         removed = pending.get("removed_hosts", [])
         host_diff = (f"主机: {pending.get('current_host_count', '?')} → "
@@ -3540,6 +3652,7 @@ def handle_cb(chat, mid, data, cb_id=None):
         candidate_error = pending.get("candidate_error")
         error_text = ("⚠️ 新版本解析失败: <code>" + _esc(candidate_error) + "</code>\n"
                       if candidate_error else "")
+        rule_diff = _adblock_pending_rule_diff_text(pending)
         edit(chat, mid,
              f"确认批准 <b>{_esc(source['name'])}</b> 的远程内容变化？\n"
              f"SHA: <code>{_esc(str(pending.get('approved_sha256', ''))[:12])}</code> → "
@@ -3547,16 +3660,22 @@ def handle_cb(chat, mid, data, cb_id=None):
              + host_diff
              + f"重写: {pending.get('current_rule_count', '?')} → "
                f"{pending.get('new_rule_count', '?')}\n"
-             + samples + error_text
-             + "批准时会重新下载并核对完整 SHA；不一致则拒绝。",
+             + rule_diff + samples + error_text
+             + "批准时会重新下载并核对完整 SHA；不一致则拒绝。"
+               "本次确认仅限当前聊天管理员，10 分钟内可使用一次。",
              {"inline_keyboard": [
-                 [{"text": "批准并应用", "callback_data": "adsrc_upd_yes:" + source_id}],
+                 [{"text": "批准并应用", "callback_data": "adsrc_upd_yes:" + approval_token}],
                  [{"text": "取消", "callback_data": "adblock_sources"}]]}); return
     if data.startswith("adsrc_upd_yes:"):
-        source_id = data.split(":", 1)[1]
+        approval_token = data.split(":", 1)[1]
+        approval, error = _adblock_consume_approval(approval_token, chat, actor_id)
+        if not approval:
+            title, kb = _adblock_sources_page()
+            edit(chat, mid, "❌ " + error + "\n\n" + title, kb); return
         edit(chat, mid, "正在重新校验并应用插件更新…", ADBLOCK_BACK)
-        def _adsrc_approve(sid=source_id):
-            ok, msg = approve_adblock_plugin_update(sid)
+        def _adsrc_approve(item=approval):
+            ok, msg = approve_adblock_plugin_update(
+                item["source_id"], item["candidate_sha"], item["generation"])
             title, kb = _adblock_sources_page()
             edit(chat, mid, (msg if ok else ("❌ " + msg)) + "\n\n" + title, kb)
         run_bg(_adsrc_approve); return
@@ -4238,7 +4357,7 @@ def main():
                         answer_cb_async(q["id"], "正在处理上一项操作，请稍候…")
                         continue
                     answer_cb_async(q["id"])
-                    handle_cb(chat_id, mid, data, q["id"])
+                    handle_cb(chat_id, mid, data, q["id"], q["from"]["id"])
             except Exception as e:  # noqa: BLE001
                 print("handle err", e, flush=True)
 

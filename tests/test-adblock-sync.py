@@ -518,6 +518,12 @@ with tempfile.TemporaryDirectory() as td:
     assert pending["pending_updates"][0]["approved_sha256"] == approved
     assert pending["pending_updates"][0]["sha256"] == hashlib.sha256(
         changed_module.encode()).hexdigest()
+    update = pending["pending_updates"][0]
+    assert update["added_rule_count"] == 1
+    assert update["removed_rule_count"] == 1
+    assert update["added_rules"][0]["action"] == "reject-dict"
+    assert "new-ad" in update["added_rules"][0]["pattern"]
+    assert "/ad" in update["removed_rules"][0]["pattern"]
 
     missing_cache = sync.compile_sources(
         pinned_config, fetcher=lambda _url: changed_module,

@@ -44,6 +44,8 @@ MAX_MITM_HOSTS_PER_SOURCE = 2048
 MAX_MITM_HOSTS_TOTAL = 8192
 MAX_MITM_RULES_PER_SOURCE = 4096
 MAX_MITM_RULES_TOTAL = 20_000
+MAX_PENDING_RULE_SUMMARIES = 8
+MAX_PENDING_RULE_PATTERN_CHARS = 220
 SOURCE_FETCH_WORKERS = 4
 SUPPORTED_ACTIONS = {
     "reject", "reject-200", "reject-dict", "reject-img",
@@ -795,6 +797,39 @@ def _read_module_cache(cache_dir, url, digest):
         return None
 
 
+def _module_rule_key(rule):
+    return json.dumps(rule, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def _pending_rule_summary(rule):
+    raw_hosts = rule.get("hosts", [])
+    if not isinstance(raw_hosts, list):
+        raw_hosts = []
+    hosts = [str(host)[:253] for host in raw_hosts
+             if isinstance(host, str)][:8]
+    return {
+        "action": str(rule.get("action") or "unknown")[:80],
+        "hosts": hosts,
+        "pattern": str(rule.get("pattern") or "")[:MAX_PENDING_RULE_PATTERN_CHARS],
+    }
+
+
+def _pending_rule_diff(current_rules, candidate_rules):
+    current = {_module_rule_key(rule): rule for rule in current_rules}
+    candidate = {_module_rule_key(rule): rule for rule in candidate_rules}
+    added_keys = sorted(candidate.keys() - current.keys())
+    removed_keys = sorted(current.keys() - candidate.keys())
+    return {
+        "added_rule_count": len(added_keys),
+        "removed_rule_count": len(removed_keys),
+        "added_rules": [_pending_rule_summary(candidate[key])
+                        for key in added_keys[:MAX_PENDING_RULE_SUMMARIES]],
+        "removed_rules": [_pending_rule_summary(current[key])
+                          for key in removed_keys[:MAX_PENDING_RULE_SUMMARIES]],
+    }
+
+
 def _write_module_cache(cache_dir, url, digest, text):
     if not cache_dir:
         return
@@ -921,6 +956,7 @@ def compile_sources(config, fetcher=fetch_text, module_cache_dir=None,
                         "added_hosts": sorted(set(candidate["hosts"]) - set(module["hosts"]))[:64],
                         "removed_hosts": sorted(set(module["hosts"]) - set(candidate["hosts"]))[:64],
                     })
+                    update.update(_pending_rule_diff(module["rules"], candidate["rules"]))
                 except Exception as exc:  # candidate is never activated on parse failure
                     update["candidate_error"] = str(exc)[:200]
                 pending_updates.append(update)
