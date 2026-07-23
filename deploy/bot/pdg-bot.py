@@ -62,6 +62,7 @@ ADBLOCK_SOURCE_LIMIT = 64
 ADBLOCK_PRIVATE_RESOURCE_LIMIT = 128
 ADBLOCK_FETCH_WORKERS = 4
 ADBLOCK_COMPATIBILITY_LIMIT = 256
+ADBLOCK_PLUGIN_PAGE_SIZE = 10
 CONFIG_LOCK_FILE = "/run/privdns-gateway.lock"
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
@@ -640,9 +641,12 @@ def _adblock_page():
             f"不可达重写: {unreachable}  待批准模块: {pending_modules}\n"
             f"固定资源失效: {stale_resources}\n"
             f"最近同步: <code>{_esc(generated)}</code>\n\n"
-            "自动更新: 每日 04:30；MITM 内容变化需在插件页批准\n\n"
+            "自动更新: 每日 04:30；MITM 内容变化需在待批准更新页确认\n\n"
             "MITM 只执行已固定哈希的安全转换；不会直接执行远程 JavaScript。")
     rows = [[{"text": "📜 安装共享 CA", "callback_data": "adblock_ca"}]]
+    if pending_modules:
+        rows.append([{"text": f"⬆️ 待批准更新 ({pending_modules})",
+                      "callback_data": "adsrc_pending_page:0"}])
     rows.append([
         {"text": "📚 REJECT 规则源", "callback_data": "adblock_domain_sources"},
         {"text": "🧩 MITM 插件", "callback_data": "adblock_sources"},
@@ -656,15 +660,36 @@ def _adblock_page():
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
 
-def _adblock_sources_page():
-    sources = _adblock_module_sources()
+def _adblock_sources_page(page=0, pending_only=False):
+    all_sources = _adblock_module_sources()
+    sources = ([source for source in all_sources if source.get("pending")]
+               if pending_only else all_sources)
     pending_count = sum(bool(source.get("pending")) for source in sources)
-    text = ("🧩 <b>MITM 插件管理</b>\n"
-            f"当前: <b>{len(sources)}</b> 个。删除以单个 Kelee/Loon 插件为单位；"
-            "普通 REJECT 规则不在这里删除。\n"
-            f"待批准更新: <b>{pending_count}</b>；批准前继续使用已固定的旧版本。")
-    rows = [[{"text": "➕ 添加插件 URL", "callback_data": "adsrc_add"}]]
-    for source in sources[:64]:
+    page_count = max(1, math.ceil(len(sources) / ADBLOCK_PLUGIN_PAGE_SIZE))
+    try:
+        page = int(page)
+    except (TypeError, ValueError):
+        page = 0
+    page = max(0, min(page, page_count - 1))
+    start = page * ADBLOCK_PLUGIN_PAGE_SIZE
+    current_sources = sources[start:start + ADBLOCK_PLUGIN_PAGE_SIZE]
+
+    if pending_only:
+        text = ("⬆️ <b>待批准 MITM 更新</b>\n"
+                f"当前: <b>{len(sources)}</b> 个。批准前继续使用已固定的旧版本。\n"
+                "点插件名称查看差异并决定是否应用。")
+        page_callback = "adsrc_pending_page"
+    else:
+        text = ("🧩 <b>MITM 插件管理</b>\n"
+                f"当前: <b>{len(all_sources)}</b> 个。删除以单个 Kelee/Loon 插件为单位；"
+                "普通 REJECT 规则不在这里删除。\n"
+                f"待批准更新: <b>{pending_count}</b>；批准前继续使用已固定的旧版本。")
+        page_callback = "adsrc_page"
+
+    rows = []
+    if not pending_only:
+        rows.append([{"text": "➕ 添加插件 URL", "callback_data": "adsrc_add"}])
+    for source in current_sources:
         label = " ".join(source["name"].split())[:42] or source["url"][:42]
         if source.get("pending"):
             rows.append([
@@ -673,6 +698,17 @@ def _adblock_sources_page():
             ])
         else:
             rows.append([{"text": "🗑 " + label, "callback_data": "adsrc_del:" + source["id"]}])
+    if not current_sources:
+        rows.append([{"text": "暂无待批准更新", "callback_data": "adblock"}])
+    if page_count > 1:
+        navigation = []
+        if page:
+            navigation.append({"text": "‹", "callback_data": f"{page_callback}:{page - 1}"})
+        navigation.append({"text": f"{page + 1}/{page_count}",
+                           "callback_data": f"{page_callback}:{page}"})
+        if page + 1 < page_count:
+            navigation.append({"text": "›", "callback_data": f"{page_callback}:{page + 1}"})
+        rows.append(navigation)
     rows.extend([[{"text": "⬅️ 返回去广告", "callback_data": "adblock"}],
                  [{"text": "🏠 主菜单", "callback_data": "menu"}]])
     return text, {"inline_keyboard": rows}
@@ -3454,6 +3490,21 @@ def handle_cb(chat, mid, data, cb_id=None):
     if data == "adblock_sources":
         state.pop(chat, None)
         title, kb = _adblock_sources_page(); edit(chat, mid, title, kb); return
+    if data.startswith("adsrc_page:"):
+        state.pop(chat, None)
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+        title, kb = _adblock_sources_page(page); edit(chat, mid, title, kb); return
+    if data.startswith("adsrc_pending_page:"):
+        state.pop(chat, None)
+        try:
+            page = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            page = 0
+        title, kb = _adblock_sources_page(page, pending_only=True)
+        edit(chat, mid, title, kb); return
     if data == "adblock_domain_sources":
         state.pop(chat, None)
         title, kb = _adblock_domain_sources_page(); edit(chat, mid, title, kb); return
