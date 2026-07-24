@@ -792,7 +792,7 @@ cmd_update(){
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
   migrate_fw_local_service_bypass # 老装: 本机探测/Telegram 入口不能被 TPROXY 截走
-  migrate_fw_quic_fast_reject # 老装: UDP/443 静默 drop 会让部分 App 无法回落 TCP
+  migrate_fw_quic_fast_reject /etc/nftables.conf # 老装: UDP/443 静默 drop 会让部分 App 无法回落 TCP
   migrate_fw_android_dot_gms  # 老装: 853 公网 DoT(安卓 Wi-Fi) + GMS 5228-5230
   migrate_mosdns_whatsapp     # 老装: WhatsApp 无 SNI 返回真实 IP
 
@@ -1057,7 +1057,7 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_fw_quic_fast_reject || true; migrate_fw_android_dot_gms || true
+       migrate_fw_quic_fast_reject /etc/nftables.conf || true; migrate_fw_android_dot_gms || true
        migrate_mosdns_whatsapp || true ;;   # 管理类命令才迁移
   esac
 fi
@@ -1067,7 +1067,7 @@ case "${1:-menu}" in
   status|st)     cmd_status;;
   doctor|dr)     shift || true; cmd_doctor "${1:-}";;
   update|up)     shift || true; cmd_update "${1:-}";;
-  migrate-fw)    need_root migrate-fw; migrate_firewall_to_pdg; migrate_fw_quic_fast_reject;;
+  migrate-fw)    need_root migrate-fw; migrate_firewall_to_pdg; migrate_fw_quic_fast_reject /etc/nftables.conf;;
   snapshot|snap) cmd_snapshot;;
   rollback)      shift || true; cmd_rollback "${1:-0}";;
   token)         cmd_token;;
