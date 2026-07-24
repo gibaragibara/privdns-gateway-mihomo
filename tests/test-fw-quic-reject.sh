@@ -54,6 +54,6 @@ if _fw_render_quic_reject "$WORK/unknown.nft" 172.22.0.0/16 > "$WORK/unknown.out
 fi
 
 grep -q 'ip saddr __INTERNAL_CIDR__ udp dport 443 reject' "$ROOT/deploy/firewall/nftables.conf"
-grep -q 'migrate_fw_quic_fast_reject # 老装' "$ROOT/deploy/bot/pdg.sh"
+grep -q 'migrate_fw_quic_fast_reject /etc/nftables.conf # 老装' "$ROOT/deploy/bot/pdg.sh"
 
 echo "firewall QUIC fast-reject regression OK"
