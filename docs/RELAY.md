@@ -30,7 +30,7 @@ SNI/HTTP Host 将有 IPv4 节点的国内服务送到 `DIRECT`。
 
 ## 为什么使用 20443
 
-现有 5GPN 旧链路把手机发往网关 `:443` 的普通 HTTPS/QUIC 透明送入 mihomo。如果 Envoy 直接
+现有 5GPN 旧链路把手机发往网关 `:443` 的普通 HTTPS 透明送入 mihomo，并快速 reject QUIC 使其回落 TCP。如果 Envoy 直接
 占用 `:443`，旧链路会立即失效。并行阶段使用 `:20443`，新 Relay 与旧 DoT/TPROXY 可以同时
 存在；验证失败只需移除手机描述文件并停掉 Relay。
 

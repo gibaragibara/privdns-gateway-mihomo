@@ -90,6 +90,7 @@ _fw_is_stock(){
     "^ip saddr ${cre} udp dport [{] (53|443)(, (53|443))* [}] accept$"
     "^ip saddr ${cre} udp dport (53|443) accept$"
     "^ip saddr ${cre} udp dport 443 reject$"
+    "^ip saddr ${cre} udp dport 443 drop$"
     '^ip protocol icmp accept$'
     '^ip6 nexthdr icmpv6 accept$'
     '^[}]$'
@@ -211,6 +212,67 @@ migrate_fw_local_service_bypass(){
     cp -a "$bak" "$f" 2>/dev/null || true
     nft -f "$f" 2>/dev/null || true
     c_y "应用 :81/:8445 防火墙豁免失败，已回滚。"
+  fi
+}
+
+# Render the project-owned UDP/443 policy to stdout. Legacy installs used a
+# silent drop; that can leave QUIC-first apps waiting until their own timeout
+# instead of falling back to TCP. Keep QUIC disabled, but fail it immediately.
+_fw_render_quic_reject(){
+  local f="$1" cidr="$2"
+  local reject_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)'
+  local drop_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 drop([[:space:]]|$)'
+  if grep -Eq "$reject_re" "$f"; then
+    cat "$f"
+    return 0
+  fi
+  if grep -Eq "$drop_re" "$f"; then
+    awk -v re="$drop_re" '
+      $0 ~ re { sub(/dport 443 drop/, "dport 443 reject") }
+      { print }
+    ' "$f"
+    return 0
+  fi
+  awk -v rule="        ip saddr $cidr udp dport 443 reject" '
+    !done && /tproxy ip to 127[.]0[.]0[.]1:7893/ { print rule; done=1 }
+    { print }
+    END { if (!done) exit 1 }
+  ' "$f"
+}
+
+# Existing inet-pdg installs are intentionally not re-rendered during update,
+# so migrate only the exact project QUIC rule and preserve every other custom
+# firewall line. This also repairs the short-lived template that allowed QUIC.
+migrate_fw_quic_fast_reject(){
+  local f="${1:-/etc/nftables.conf}" cidr tmp bak
+  local reject_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)'
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0
+  grep -q 'tproxy ip to 127.0.0.1:7893' "$f" || return 0
+  grep -Eq "$reject_re" "$f" && return 0
+  cidr=$(grep -oE 'ip saddr [0-9./]+' "$f" | head -1 | awk '{print $3}')
+  if [[ -z "$cidr" ]]; then
+    c_y "无法迁移 QUIC 快速回退: 内网段缺失。"
+    return 0
+  fi
+  tmp=$(mktemp); bak="$f.pre-quic-reject.$(date +%s)"
+  if ! _fw_render_quic_reject "$f" "$cidr" > "$tmp" \
+      || ! grep -Eq "$reject_re" "$tmp" \
+      || ! nft -c -f "$tmp" >/dev/null 2>&1; then
+    c_y "生成 QUIC 快速 reject 规则失败，保留原配置。"; rm -f "$tmp"; return 0
+  fi
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak" \
+      || ! cp "$tmp" "$f" 2>/dev/null || ! cmp -s "$tmp" "$f"; then
+    cp -a "$bak" "$f" 2>/dev/null || true
+    c_y "写入 QUIC 快速 reject 规则失败，已保留原配置。"; rm -f "$tmp"; return 0
+  fi
+  rm -f "$tmp"
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ UDP/443 已改为快速 reject；QUIC 仍禁用，客户端可立即回落 TCP。"
+  else
+    cp -a "$bak" "$f" 2>/dev/null || true
+    nft -f "$f" 2>/dev/null || true
+    c_y "应用 QUIC 快速 reject 规则失败，已回滚。"
   fi
 }
 
@@ -730,6 +792,7 @@ cmd_update(){
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
   migrate_fw_local_service_bypass # 老装: 本机探测/Telegram 入口不能被 TPROXY 截走
+  migrate_fw_quic_fast_reject # 老装: UDP/443 静默 drop 会让部分 App 无法回落 TCP
   migrate_fw_android_dot_gms  # 老装: 853 公网 DoT(安卓 Wi-Fi) + GMS 5228-5230
   migrate_mosdns_whatsapp     # 老装: WhatsApp 无 SNI 返回真实 IP
 
@@ -994,7 +1057,8 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_fw_android_dot_gms || true; migrate_mosdns_whatsapp || true ;;   # 管理类命令才迁移
+       migrate_fw_quic_fast_reject || true; migrate_fw_android_dot_gms || true
+       migrate_mosdns_whatsapp || true ;;   # 管理类命令才迁移
   esac
 fi
 
@@ -1003,7 +1067,7 @@ case "${1:-menu}" in
   status|st)     cmd_status;;
   doctor|dr)     shift || true; cmd_doctor "${1:-}";;
   update|up)     shift || true; cmd_update "${1:-}";;
-  migrate-fw)    need_root migrate-fw; migrate_firewall_to_pdg;;
+  migrate-fw)    need_root migrate-fw; migrate_firewall_to_pdg; migrate_fw_quic_fast_reject;;
   snapshot|snap) cmd_snapshot;;
   rollback)      shift || true; cmd_rollback "${1:-0}";;
   token)         cmd_token;;

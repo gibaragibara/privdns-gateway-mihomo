@@ -161,7 +161,7 @@ sudo pdg report       # 生成脱敏诊断报告(贴出来求助用)
 「DNS + SNI」这套只兜走 **80 / 443、能按域名/SNI 判定**的流量。下面这些天生不走这套,属正常:
 
 - **Speedtest 测速 / 纯 UDP(游戏联机、WebRTC)/ 直连 IP 的 App**:可在手机上常备一个 iOS 自带的**全局 VPN(IKEv2)**作兜底,要用时一键开、不用时关。
-- **QUIC / HTTP3**:网关已 reject 手机源 UDP/443,逼客户端回落 TCP/443(才能被嗅 SNI 分流)。
+- **QUIC / HTTP3**:网关对手机源 UDP/443 做快速 `reject`(不是静默 `drop`),让客户端立即回落 TCP/443；静默丢包会让部分游戏/App 直接报网络错误。
 - **Telegram App**:走直连 IP,不吃 DNS+SNI 分流。已内置一个**仅内网卡可达的 SOCKS5(网关 IP:8445)**:在 Telegram「设置 → 数据和存储 → 代理」加 SOCKS5、填 `网关IP:8445`(无需账号密码)即可。出口可在 bot **📱 客户端 → ✈️ Telegram 出口** 单独选(默认跟随「默认出口」);想走 hk 就选 hk。
 
 ---

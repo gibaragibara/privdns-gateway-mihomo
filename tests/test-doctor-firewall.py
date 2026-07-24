@@ -45,6 +45,25 @@ checks._run = lambda cmd: (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport 
 st, _, msg = checks.check_nft()
 assert st == "ok", (st, msg)
 
+# QUIC 必须快速 reject；静默 drop 会让部分 App 在回落 TCP 前先报网络错误。
+checks._run = lambda cmd: (
+    0, "chain prerouting {\n ip saddr 172.22.0.0/16 udp dport 443 reject\n}", ""
+)
+st, _, msg = checks.check_quic_fallback()
+assert st == "ok" and "回落 TCP" in msg, (st, msg)
+
+checks._run = lambda cmd: (
+    0, "chain prerouting {\n ip saddr 172.22.0.0/16 udp dport 443 drop\n}", ""
+)
+st, _, msg = checks.check_quic_fallback()
+assert st == "fail" and "静默 drop" in msg, (st, msg)
+
+checks._run = lambda cmd: (
+    0, "chain prerouting {\n tproxy ip to 127.0.0.1:7893\n}", ""
+)
+st, _, msg = checks.check_quic_fallback()
+assert st == "warn" and "HTTP/3" in msg, (st, msg)
+
 # check_gms: TPROXY 存在 → ok
 checks._run = lambda cmd: (
     (0, "chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80, 81, 443, 5228-5230, 8445 } accept\n}", "")

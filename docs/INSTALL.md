@@ -92,7 +92,8 @@ sudo PDG_NONINTERACTIVE=1 \
 |---|---|---|---|
 | 22 | tcp | 全网 | SSH 管理 |
 | 853 | tcp | **公网** | **DoT — 手机私密 DNS 入口(核心)**; 公网放行以便 Android 在 Wi-Fi 下私密 DNS 可用(mosdns 只对内网段劫持 A 记录) |
-| 443 | tcp+udp | 仅内网卡段 | **mihomo TPROXY 数据入口(嗅 SNI / QUIC)** |
+| 443 | tcp | 仅内网卡段 | **mihomo TPROXY 数据入口(嗅 SNI)** |
+| 443 | udp | 仅内网卡段 | 快速 `reject` QUIC/HTTP3，促使客户端立即回落 TCP；不使用静默 `drop` |
 | 80 | tcp | 仅内网卡段 | mihomo TPROXY HTTP 入口(嗅 Host) |
 | 53 | tcp+udp | 仅内网卡段 | 明文 DNS |
 | 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点(Wi-Fi/蜂窝均用 :81 判定是否启用 DoT) |

@@ -158,6 +158,26 @@ def check_nft():
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
     return ("ok", "防火墙", "53/80/81/443/5228-5230/8445 仅限内网; 853 DoT 公网可达(安卓 Wi-Fi)")
 
+
+def check_quic_fallback():
+    """UDP/443 must fail immediately so QUIC-first apps can retry over TCP."""
+    _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "prerouting"])
+    if not out:
+        _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
+    if not out:
+        return ("warn", "QUIC 回退", "读不到 UDP/443 防火墙策略")
+    for line in out.splitlines():
+        if not re.search(r"\budp\b.*\bdport\s+443\b", line):
+            continue
+        if re.search(r"\breject\b", line):
+            return ("ok", "QUIC 回退", "UDP/443 快速 reject；QUIC 禁用且客户端可回落 TCP")
+        if re.search(r"\bdrop\b", line):
+            return ("fail", "QUIC 回退", "UDP/443 被静默 drop，部分 App 无法回落 TCP；运行 sudo pdg restart 迁移")
+    if "tproxy" in out:
+        return ("warn", "QUIC 回退", "UDP/443 未快速 reject，HTTP/3 可能绕过 MITM")
+    return ("warn", "QUIC 回退", "未检测到 UDP/443 快速 reject")
+
+
 def check_gms():
     """GMS/FCM 推送: mihomo TPROXY 已透明接管全部端口, 只需防火墙不把 5228-5230
     对非 TPROXY 路径误伤即可。mihomo 版以「input 链放行内网→5228 或 TPROXY 全端口」为 ok。"""
@@ -501,7 +521,8 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_mihomo_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_mihomo_config,
+       check_internal_cidr, check_nft, check_quic_fallback, check_gms,
+       check_cert, check_dns, check_mihomo_config,
        check_relay, check_wloc, check_adblock]
 ALERT = [check_services, check_dns, check_cert, check_relay, check_wloc, check_adblock]  # 运行期故障
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,

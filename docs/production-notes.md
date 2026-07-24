@@ -23,7 +23,7 @@
 ## 拓扑要点
 
 1. 手机只设 DoT → mosdns:国内域名真实 IP;国际域名 A=网关(内网卡段才劫持)。
-2. 流量从私网到达网关后,nftables **TPROXY** 进 mihomo `:7893`,sniffer 看 SNI/Host/QUIC 再分流。
+2. 流量从私网到达网关后,nftables **TPROXY** 进 mihomo `:7893`,sniffer 看 SNI/Host 再分流；UDP/443 快速 `reject`，让 QUIC 立即回落 TCP。
 3. 出口/规则在 Telegram bot 或 `/etc/mihomo/state.json`,改前 `mihomo -t`,失败回滚。
 4. 证书续期时脚本会临时处理 80 口与防火墙(见 `deploy/cert/`)。
 

@@ -55,18 +55,22 @@ gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853, 8445" 1 single > "$WORK/a"; as
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853"       1 multi  > "$WORK/b"; assert_stock "$WORK/b" 22 172.22.0.0/16 "多行 forward/output + {..853}"
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443"            0 multi  > "$WORK/c"; assert_stock "$WORK/c" 22 172.22.0.0/16 "最早期: 多行 + {53,80,81,443} + 无 reject 行"
 gen_stock 2222 10.0.0.0/8  "53, 80, 81, 443, 853"       1 single > "$WORK/d"; assert_stock "$WORK/d" 2222 10.0.0.0/8 "自定义 SSH端口/内网段但形态原装"
+# 少量已部署版本把项目 QUIC verdict 写成 drop；仍属于可安全重建的原装规则。
+gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/o"
+perl -0pi -e 's/udp dport 443 reject/udp dport 443 drop/' "$WORK/o"
+assert_stock "$WORK/o" 22 172.22.0.0/16 "旧版 QUIC 静默 drop 仍识别为原装"
 # 最早期(62443ad 及更早): UDP 53+443 都放行(尚未拒 QUIC)、无单独 reject 行
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443" 0 single > "$WORK/m"
-sed -i 's#udp dport { 53 }#udp dport { 53, 443 }#' "$WORK/m"
+perl -0pi -e 's/udp dport \{ 53 \}/udp dport { 53, 443 }/' "$WORK/m"
 assert_stock "$WORK/m" 22 172.22.0.0/16 "最早期: udp {53,443} 放行(QUIC 未拒)"
 # 最初版(144c865): 853(DoT)曾对全网开放, 与 SSH 同在一条全网放行
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443" 0 multi > "$WORK/n"
-sed -i -e 's#tcp dport { 22 } accept#tcp dport { 22, 853 } accept#' -e 's#udp dport { 53 }#udp dport { 53, 443 }#' "$WORK/n"
+perl -0pi -e 's/tcp dport \{ 22 \} accept/tcp dport { 22, 853 } accept/; s/udp dport \{ 53 \}/udp dport { 53, 443 }/' "$WORK/n"
 assert_stock "$WORK/n" 22 172.22.0.0/16 "最初版: 853 曾对全网开放(tcp {22,853})"
 
 # ── 自定义(都应判"非原装", 必须跳过)──
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853, 8445" 1 single > "$WORK/e"
-sed -i 's#\(ip protocol icmp accept\)#tcp dport { 8080 } accept\n        \1#' "$WORK/e"   # 多开一个全网端口
+perl -0pi -e 's/(ip protocol icmp accept)/tcp dport { 8080 } accept\n        $1/' "$WORK/e"   # 多开一个全网端口
 assert_custom "$WORK/e" 22 172.22.0.0/16 "额外开放 8080 端口(全网)"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/f"
@@ -74,28 +78,28 @@ printf '\ntable ip nat {\n    chain post {\n        type nat hook postrouting pr
 assert_custom "$WORK/f" 22 172.22.0.0/16 "额外 table ip nat + masquerade"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/g"
-sed -i 's#\(ip protocol icmp accept\)#ip saddr 203.0.113.5 tcp dport 853 accept\n        \1#' "$WORK/g"
+perl -0pi -e 's/(ip protocol icmp accept)/ip saddr 203.0.113.5 tcp dport 853 accept\n        $1/' "$WORK/g"
 assert_custom "$WORK/g" 22 172.22.0.0/16 "放行额外来源 IP(203.0.113.5)"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/h"
-sed -i 's#\(ip protocol icmp accept\)#tcp dport 443 accept\n        \1#' "$WORK/h"
+perl -0pi -e 's/(ip protocol icmp accept)/tcp dport 443 accept\n        $1/' "$WORK/h"
 assert_custom "$WORK/h" 22 172.22.0.0/16 "把 443 对全网开放(无 saddr, 非 SSH 端口)"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 multi > "$WORK/i"
-sed -i 's#\(        type filter hook forward priority 0; policy accept;\)#\1\n        ip daddr 10.1.2.3 accept#' "$WORK/i"
+perl -0pi -e 's/(        type filter hook forward priority 0; policy accept;)/$1\n        ip daddr 10.1.2.3 accept/' "$WORK/i"
 assert_custom "$WORK/i" 22 172.22.0.0/16 "forward 链加 daddr 转发规则"
 
 # 关键: 不含 dport 的自定义规则(早期语义版会漏检 → 静默删除)
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/j"
-sed -i 's#\(ip protocol icmp accept\)#ip saddr 203.0.113.5 accept\n        \1#' "$WORK/j"
+perl -0pi -e 's/(ip protocol icmp accept)/ip saddr 203.0.113.5 accept\n        $1/' "$WORK/j"
 assert_custom "$WORK/j" 22 172.22.0.0/16 "放行某来源 IP 到全部端口(无 dport)"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/k"
-sed -i 's#\(ip protocol icmp accept\)#tcp accept\n        \1#' "$WORK/k"
+perl -0pi -e 's/(ip protocol icmp accept)/tcp accept\n        $1/' "$WORK/k"
 assert_custom "$WORK/k" 22 172.22.0.0/16 "放行全部 TCP(无 dport)"
 
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/l"
-sed -i 's#\(ip protocol icmp accept\)#counter drop\n        \1#' "$WORK/l"
+perl -0pi -e 's/(ip protocol icmp accept)/counter drop\n        $1/' "$WORK/l"
 assert_custom "$WORK/l" 22 172.22.0.0/16 "counter drop(无 dport)"
 
 echo "────────────────────────────────────────"

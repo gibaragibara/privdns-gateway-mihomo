@@ -83,6 +83,9 @@ jobs:
       - name: "防火墙迁移识别回归 (原装应迁移 / 自定义应跳过)"
         run: bash tests/test-fw-migration.sh
 
+      - name: "QUIC 快速拒绝迁移回归 (drop/放行 → reject)"
+        run: bash tests/test-fw-quic-reject.sh
+
       - name: "mosdns concurrent 迁移回归 (单上游=1/多上游=2/幂等)"
         run: bash tests/test-mosdns-concurrent.sh
 
