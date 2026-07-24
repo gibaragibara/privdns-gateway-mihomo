@@ -34,6 +34,13 @@ _fw_render_quic_reject "$WORK/short.nft" 172.22.0.0/16 > "$WORK/short.out"
 grep -q 'udp dport 443 reject' "$WORK/short.out"
 ! grep -q 'dport 443 drop' "$WORK/short.out"
 
+# A temporary QUIC-allowed form must be rewritten in place; inserting a later
+# reject would leave the earlier accept effective.
+base_config | sed 's#PLACEHOLDER#ip saddr 172.22.0.0/16 udp dport 443 accept#' > "$WORK/accept.nft"
+_fw_render_quic_reject "$WORK/accept.nft" 172.22.0.0/16 > "$WORK/accept.out"
+grep -q 'udp dport 443 reject' "$WORK/accept.out"
+! grep -q 'dport 443 accept' "$WORK/accept.out"
+
 # Already-correct files are byte-for-byte unchanged.
 base_config | sed 's#PLACEHOLDER#ip saddr 172.22.0.0/16 udp dport 443 reject#' > "$WORK/reject.nft"
 _fw_render_quic_reject "$WORK/reject.nft" 172.22.0.0/16 > "$WORK/reject.out"
@@ -45,6 +52,13 @@ _fw_render_quic_reject "$WORK/allowed.nft" 172.22.0.0/16 > "$WORK/allowed.out"
 reject_line=$(grep -n 'udp dport 443 reject' "$WORK/allowed.out" | cut -d: -f1)
 tproxy_line=$(grep -n 'tproxy ip to 127.0.0.1:7893' "$WORK/allowed.out" | cut -d: -f1)
 [[ -n "$reject_line" && "$reject_line" -lt "$tproxy_line" ]]
+
+# A reject belonging to another source range must not suppress the project's
+# own rule for the TPROXY source range.
+base_config | sed 's#PLACEHOLDER#ip saddr 10.100.132.17 udp dport 443 reject#' > "$WORK/other-source.nft"
+_fw_render_quic_reject "$WORK/other-source.nft" 172.22.0.0/16 > "$WORK/other-source.out"
+grep -q 'ip saddr 10.100.132.17 udp dport 443 reject' "$WORK/other-source.out"
+grep -q 'ip saddr 172.22.0.0/16 udp dport 443 reject' "$WORK/other-source.out"
 
 # Unknown files without the project TPROXY anchor fail closed.
 printf 'table inet pdg { chain prerouting { accept } }\n' > "$WORK/unknown.nft"

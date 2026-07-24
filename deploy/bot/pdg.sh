@@ -220,15 +220,16 @@ migrate_fw_local_service_bypass(){
 # instead of falling back to TCP. Keep QUIC disabled, but fail it immediately.
 _fw_render_quic_reject(){
   local f="$1" cidr="$2"
-  local reject_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)'
-  local drop_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 drop([[:space:]]|$)'
+  local cre="${cidr//./\\.}"
+  local reject_re="^[[:space:]]*ip saddr ${cre} (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)"
+  local verdict_re="^[[:space:]]*ip saddr ${cre} (meta l4proto )?udp (th )?dport 443 (accept|drop)([[:space:]]|$)"
   if grep -Eq "$reject_re" "$f"; then
     cat "$f"
     return 0
   fi
-  if grep -Eq "$drop_re" "$f"; then
-    awk -v re="$drop_re" '
-      $0 ~ re { sub(/dport 443 drop/, "dport 443 reject") }
+  if grep -Eq "$verdict_re" "$f"; then
+    awk -v re="$verdict_re" '
+      $0 ~ re { sub(/dport 443 (accept|drop)/, "dport 443 reject") }
       { print }
     ' "$f"
     return 0
@@ -244,17 +245,21 @@ _fw_render_quic_reject(){
 # so migrate only the exact project QUIC rule and preserve every other custom
 # firewall line. This also repairs the short-lived template that allowed QUIC.
 migrate_fw_quic_fast_reject(){
-  local f="${1:-/etc/nftables.conf}" cidr tmp bak
-  local reject_re='^[[:space:]]*ip saddr [0-9./]+ (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)'
+  local f="${1:-/etc/nftables.conf}" cidr tmp bak cre reject_re
   [[ -f "$f" ]] || return 0
   grep -q 'table inet pdg' "$f" || return 0
   grep -q 'tproxy ip to 127.0.0.1:7893' "$f" || return 0
-  grep -Eq "$reject_re" "$f" && return 0
-  cidr=$(grep -oE 'ip saddr [0-9./]+' "$f" | head -1 | awk '{print $3}')
+  # Derive the source range from the project TPROXY rule, not the first
+  # arbitrary ip saddr (which may belong to a user's separate exception).
+  cidr=$(grep -E 'ip saddr [0-9./]+ .*tproxy ip to 127[.]0[.]0[.]1:7893' "$f" \
+    | head -1 | grep -oE 'ip saddr [0-9./]+' | awk '{print $3}')
   if [[ -z "$cidr" ]]; then
-    c_y "无法迁移 QUIC 快速回退: 内网段缺失。"
+    c_y "无法迁移 QUIC 快速回退: TPROXY 规则中缺少内网段。"
     return 0
   fi
+  cre="${cidr//./\\.}"
+  reject_re="^[[:space:]]*ip saddr ${cre} (meta l4proto )?udp (th )?dport 443 reject([[:space:]]|$)"
+  grep -Eq "$reject_re" "$f" && return 0
   tmp=$(mktemp); bak="$f.pre-quic-reject.$(date +%s)"
   if ! _fw_render_quic_reject "$f" "$cidr" > "$tmp" \
       || ! grep -Eq "$reject_re" "$tmp" \
